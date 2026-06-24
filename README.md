@@ -89,3 +89,7 @@ standard (the default); `75us` (US) and `50us` (EU) are the main-channel values;
 - `src/cli.zig` — argument and subcommand parsing.
 - `SPEC.md` — source of truth for the design and build phases.
 - `CLAUDE.md` — conventions for working in this repo (incl. Zig 0.16 notes).
+
+## License
+
+MIT — see [LICENSE](LICENSE).
