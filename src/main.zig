@@ -1,6 +1,7 @@
 const std = @import("std");
 const Io = std.Io;
 const cli = @import("cli.zig");
+const pipeline = @import("pipeline.zig");
 
 const usage =
     \\rtl-sca — FM SCA subcarrier decoder
@@ -56,8 +57,48 @@ pub fn main(init: std.process.Init) !void {
         std.process.exit(2);
     };
 
-    try printPlan(w, opts);
-    try w.writeAll("\n(DSP pipeline not implemented yet — Phase 1 in progress)\n");
+    switch (opts.command) {
+        .rec => try runRec(init, w, opts),
+        .play, .scan => {
+            try printPlan(w, opts);
+            try w.print("\n('{t}' is not implemented yet — Phase 1 ships 'rec')\n", .{opts.command});
+        },
+    }
+}
+
+fn runRec(init: std.process.Init, w: *Io.Writer, opts: cli.Options) !void {
+    if (opts.input != .file) {
+        try w.writeAll("rtl-sca: a live radio source is Phase 2; for now rec reads a file (.cu8/.cs16)\n");
+        try w.flush();
+        std.process.exit(1);
+    }
+    const out_path = opts.out.?; // cli.parse guarantees rec has -o
+
+    var p: pipeline.Pipeline = undefined;
+    p.init(init.gpa, opts) catch |err| {
+        try w.print("rtl-sca: {s}\n", .{pipelineErrorText(err)});
+        try w.flush();
+        std.process.exit(1);
+    };
+    defer p.deinit();
+
+    p.runFile(init.io, opts.input.file, out_path) catch |err| {
+        try w.print("rtl-sca: failed to decode '{s}': {s}\n", .{ opts.input.file, @errorName(err) });
+        try w.flush();
+        std.process.exit(1);
+    };
+    try w.print("wrote {s}\n", .{out_path});
+}
+
+fn pipelineErrorText(err: pipeline.InitError) []const u8 {
+    return switch (err) {
+        error.RateNotDivisible => "sample rate must divide to 16 kHz audio (try --rate 1.024M)",
+        error.NyquistTrap => "sample rate too low to extract the subcarrier safely",
+        error.SubcarrierAboveNyquist => "subcarrier + bandwidth falls outside the usable MPX band",
+        error.FilterTooSharp => "requested bandwidth needs an impractically sharp filter",
+        error.BadBandwidth => "invalid --bw for this rate",
+        error.OutOfMemory => "out of memory",
+    };
 }
 
 fn printPlan(w: *Io.Writer, o: cli.Options) !void {
@@ -96,4 +137,13 @@ fn printPlan(w: *Io.Writer, o: cli.Options) !void {
 
 test {
     _ = cli;
+    _ = @import("complex.zig");
+    _ = @import("fmdemod.zig");
+    _ = @import("firdecim.zig");
+    _ = @import("nco.zig");
+    _ = @import("deemph.zig");
+    _ = @import("sink.zig");
+    _ = @import("source.zig");
+    _ = @import("subcarrier.zig");
+    _ = @import("pipeline.zig");
 }
