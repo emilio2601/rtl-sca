@@ -1,0 +1,5 @@
+.zig-cache/
+zig-out/
+*.cu8
+*.cs16
+*.wav
