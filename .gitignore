@@ -1,5 +1,6 @@
 .zig-cache/
 zig-out/
+zig-pkg/
 *.cu8
 *.cs16
 *.wav

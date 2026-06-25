@@ -2,6 +2,10 @@ const std = @import("std");
 const Io = std.Io;
 const cli = @import("cli.zig");
 const pipeline = @import("pipeline.zig");
+const ring_mod = @import("ring.zig");
+const Running = ring_mod.Running;
+const source_mod = @import("source.zig");
+const sink_mod = @import("sink.zig");
 
 const usage =
     \\rtl-sca — FM SCA subcarrier decoder
@@ -59,35 +63,101 @@ pub fn main(init: std.process.Init) !void {
 
     switch (opts.command) {
         .rec => try runRec(init, w, opts),
-        .play, .scan => {
+        .play => try runPlay(init, w, opts),
+        .scan => {
             try printPlan(w, opts);
-            try w.print("\n('{t}' is not implemented yet — Phase 1 ships 'rec')\n", .{opts.command});
+            try w.writeAll("\n('scan' is not implemented yet — Phase 4)\n");
         },
     }
 }
 
 fn runRec(init: std.process.Init, w: *Io.Writer, opts: cli.Options) !void {
-    if (opts.input != .file) {
-        try w.writeAll("rtl-sca: a live radio source is Phase 2; for now rec reads a file (.cu8/.cs16)\n");
-        try w.flush();
-        std.process.exit(1);
-    }
     const out_path = opts.out.?; // cli.parse guarantees rec has -o
 
     var p: pipeline.Pipeline = undefined;
-    p.init(init.gpa, opts) catch |err| {
-        try w.print("rtl-sca: {s}\n", .{pipelineErrorText(err)});
-        try w.flush();
-        std.process.exit(1);
-    };
+    p.init(init.gpa, opts) catch |err| reportInit(w, err);
     defer p.deinit();
 
-    p.runFile(init.io, opts.input.file, out_path) catch |err| {
-        try w.print("rtl-sca: failed to decode '{s}': {s}\n", .{ opts.input.file, @errorName(err) });
-        try w.flush();
-        std.process.exit(1);
-    };
+    var wsink: sink_mod.WavSink = undefined;
+    var wbuf: [1 << 16]u8 = undefined;
+    wsink.init(init.io, out_path, &wbuf, p.fs_audio) catch |err| reportRun(w, err);
+
+    var running = Running.init(true);
+    installSigint(&running); // Ctrl-C finalizes a live recording cleanly
+    driveSource(&p, init, opts, .{ .wav = &wsink }, &running) catch |err| reportRun(w, err);
     try w.print("wrote {s}\n", .{out_path});
+}
+
+fn runPlay(init: std.process.Init, w: *Io.Writer, opts: cli.Options) !void {
+    var p: pipeline.Pipeline = undefined;
+    p.init(init.gpa, opts) catch |err| reportInit(w, err);
+    defer p.deinit();
+
+    var ring_buf: [1 << 15]f32 = undefined; // ~2 s at 16 kHz
+    var ring = ring_mod.Ring.init(&ring_buf);
+    var running = Running.init(true);
+    var asink: sink_mod.AudioSink = undefined;
+    asink.init(&ring, &running, p.fs_audio) catch |err| reportRun(w, err);
+    installSigint(&running);
+
+    driveSource(&p, init, opts, .{ .audio = &asink }, &running) catch |err| reportRun(w, err);
+}
+
+/// Build the right source (file or rtl_tcp) as a local and pump it into `sink`.
+fn driveSource(p: *pipeline.Pipeline, init: std.process.Init, opts: cli.Options, sink: sink_mod.Sink, running: *Running) !void {
+    const io = init.io;
+    if (opts.rtl_tcp) |host_port| {
+        const freq = switch (opts.input) {
+            .freq => |f| f,
+            .file => return error.RtlTcpNeedsFreq,
+        };
+        var rs: source_mod.RtlTcpSource = undefined;
+        try rs.init(io, host_port, freq, opts.rate_hz, opts.gain, opts.ppm, p.reader_buf);
+        defer rs.close(io);
+        try p.run(io, .{ .rtltcp = &rs }, sink, running);
+    } else switch (opts.input) {
+        .file => |path| {
+            var fs: source_mod.FileSource = undefined;
+            try fs.init(io, path, p.reader_buf);
+            defer fs.close(io);
+            try p.run(io, .{ .file = &fs }, sink, running);
+        },
+        .freq => return error.LiveFreqNeedsRtlTcp,
+    }
+}
+
+var g_running: ?*Running = null;
+
+fn onSigint(_: std.posix.SIG) callconv(.c) void {
+    if (g_running) |r| r.store(false, .release);
+}
+
+fn installSigint(running: *Running) void {
+    g_running = running;
+    var act = std.posix.Sigaction{
+        .handler = .{ .handler = onSigint },
+        .mask = std.posix.sigemptyset(),
+        .flags = 0,
+    };
+    std.posix.sigaction(std.posix.SIG.INT, &act, null);
+}
+
+fn reportInit(w: *Io.Writer, err: pipeline.InitError) noreturn {
+    w.print("rtl-sca: {s}\n", .{pipelineErrorText(err)}) catch {};
+    w.flush() catch {};
+    std.process.exit(1);
+}
+
+fn reportRun(w: *Io.Writer, err: anyerror) noreturn {
+    const msg: []const u8 = switch (err) {
+        error.LiveFreqNeedsRtlTcp => "a live radio frequency needs --rtl-tcp host:port (USB is a later phase)",
+        error.RtlTcpNeedsFreq => "--rtl-tcp needs a frequency as the input, not a file",
+        error.AudioInit, error.AudioStart => "could not open the audio output device",
+        else => @errorName(err),
+    };
+    w.print("rtl-sca: {s}\n", .{msg}) catch {};
+    w.flush() catch {};
+    std.process.exit(1);
 }
 
 fn pipelineErrorText(err: pipeline.InitError) []const u8 {
@@ -146,4 +216,5 @@ test {
     _ = @import("source.zig");
     _ = @import("subcarrier.zig");
     _ = @import("pipeline.zig");
+    _ = @import("ring.zig");
 }

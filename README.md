@@ -13,15 +13,19 @@ See [`SPEC.md`](SPEC.md) for the full signal-chain design and background.
 
 ## Status
 
-Early. The CLI and argument parsing are in place; the DSP pipeline is being built
-phase by phase (see Roadmap). Today the binary parses a command and prints the
-resolved plan — it does not yet demodulate.
+Working through the build phases (see Roadmap). `rec` decodes a recorded IQ file to a
+WAV, and `play` plays a subcarrier live — from a file or from an `rtl_tcp` network
+server — out the speakers. `scan` is not implemented yet. Validated end to end on a
+real over-the-air signal (Q104.3, decoded and heard live from a remote Pi).
 
 ## Requirements
 
 - **Zig 0.16+** (`brew install zig`).
-- An RTL-SDR is only needed for live capture (a later phase). The DSP chain is
-  developed and validated against recorded IQ files first.
+- Live playback links a small C shim over the vendored [miniaudio](https://miniaud.io)
+  (`c/`); the build needs libc and, on macOS, the CoreAudio/AudioToolbox frameworks
+  (wired automatically in `build.zig`).
+- An RTL-SDR is only needed for live use. For the network source, run
+  `rtl_tcp -a 0.0.0.0 -f <freq> -s 1024000` on the radio host.
 
 ## Build
 
@@ -41,12 +45,15 @@ rtl-sca <command> <input> [flags]
 else is treated as a recorded IQ file path.
 
 ```sh
-rtl-sca scan 89.9M                                   # survey the MPX for subcarriers
-rtl-sca play 89.9M --sub 67k --mod fm --deemph 150us # demodulate and play live
-rtl-sca rec  89.9M --sub 67k -o gatewave.wav         # demodulate and write a WAV
-rtl-sca play capture.cu8 --sub 86k --mod am-env      # work offline from a capture
-rtl-sca play 89.9M --sub 0 --bw 15k --deemph 75us    # main program audio (mono)
+rtl-sca play capture.cu8 --sub 0 --bw 15k --deemph 75us       # play a capture's mono program
+rtl-sca play capture.cu8 --sub 67k                            # play the 67 kHz SCA from a file
+rtl-sca play 89.9M --rtl-tcp 192.168.1.50:1234 --sub 0        # play live from an rtl_tcp server
+rtl-sca rec  89.9M --rtl-tcp 192.168.1.50:1234 --sub 67k -o out.wav   # record live to a WAV
+rtl-sca rec  capture.cu8 --sub 67k -o gatewave.wav            # decode a capture to a WAV
 ```
+
+Live commands run until Ctrl-C (which finalizes the WAV). `--rtl-tcp` takes an
+`IP:port` (numeric IP); the positional `<input>` is then the tune frequency.
 
 The **main program audio is the slot at 0 Hz**: `--sub 0` (with ~15 kHz bandwidth and
 75 µs de-emphasis) recovers normal mono FM. It's supported as a validation/utility
@@ -75,13 +82,13 @@ standard (the default); `75us` (US) and `50us` (EU) are the main-channel values;
 
 ## Roadmap
 
-| Phase | Scope |
-|-------|-------|
-| 1 | Offline MVP: file source → FM demod → 67 kHz FM subcarrier → de-emphasis → WAV |
-| 2 | Live: `rtl_tcp` and USB sources, audio playback via miniaudio |
-| 3 | Configurable: main/subcarrier freq, modulation mode, de-emphasis; AM demod paths |
-| 4 | `scan` survey mode: PSD, pilot/slot detection, AM-vs-FM classification, SNR |
-| 5 | Stretch: RDS decode, headless Pi daemon, arbitrary-rate resampler |
+| Phase | Scope | |
+|-------|-------|---|
+| 1 | Offline MVP: file source → FM demod → 67 kHz FM subcarrier → de-emphasis → WAV | ✅ |
+| 2 | Live: `rtl_tcp` network source + audio playback via miniaudio (USB source deferred) | ✅ |
+| 3 | Configurable modulation; AM demod paths (`am-env`, `am-coherent`); `UsbSource` | |
+| 4 | `scan` survey mode: PSD, pilot/slot detection, AM-vs-FM classification, SNR | |
+| 5 | Stretch: RDS decode, headless Pi daemon, arbitrary-rate resampler | |
 
 ## Project layout
 

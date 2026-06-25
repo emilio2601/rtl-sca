@@ -270,7 +270,10 @@ raw Hz. Value flags accept both `--flag value` and `--flag=value`.
   language builtin; use `b.addTranslateC(...)` in `build.zig` and link the C library
   on that step instead of source-level `@cImport`):
   - `librtlsdr` (Phase 2 USB source).
-  - `miniaudio` (single-header, vendored) for playback.
+  - `miniaudio` (single-header C) for playback, pinned in `build.zig.zon` and fetched
+    by the package manager (hash-locked, not committed). A small C shim (`c/audio_shim.*`)
+    wraps it so Zig only translates the clean shim API, never miniaudio's nested
+    anonymous structs.
   - An FFT for survey mode: vendor a small C FFT (kissfft/pocketfft) translated via the
     build system, OR implement a radix-2 FFT in Zig.
 - **liquid-dsp is OPT-IN, not required.** There is no usable Zig binding (the repo

@@ -1,4 +1,9 @@
 const std = @import("std");
+const audio = @import("audio");
+const Ring = @import("ring.zig").Ring;
+const Running = @import("ring.zig").Running;
+
+extern fn usleep(usecs: c_uint) c_int; // libc; backpressure pacing for the producer
 
 /// Writes a canonical 16-bit PCM mono WAV. The 44-byte header is written up front
 /// with placeholder sizes; `finish` seeks back and patches the RIFF and data sizes.
@@ -54,6 +59,71 @@ pub const WavSink = struct {
         try self.fw.interface.writeInt(u32, data_bytes, .little);
         try self.fw.interface.flush();
         self.file.close(io);
+    }
+};
+
+/// Plays mono f32 audio live through the default device (miniaudio, via the C
+/// shim). The DSP thread calls `writeAudio` (producer); miniaudio's audio thread
+/// pulls from the ring in `pullCb` (consumer). The ring is caller-owned and must
+/// outlive the device.
+pub const AudioSink = struct {
+    handle: *audio.sca_audio,
+    ring: *Ring,
+    running: *const Running,
+
+    pub fn init(self: *AudioSink, ring: *Ring, running: *const Running, sample_rate: u32) !void {
+        const h = audio.sca_audio_create() orelse return error.AudioInit;
+        self.* = .{ .handle = h, .ring = ring, .running = running };
+        if (audio.sca_audio_start(h, sample_rate, pullCb, @ptrCast(ring)) != 0) {
+            audio.sca_audio_destroy(h);
+            return error.AudioStart;
+        }
+    }
+
+    pub fn writeAudio(self: *AudioSink, samples: []const f32) !void {
+        var i: usize = 0;
+        while (i < samples.len) {
+            i += self.ring.tryPush(samples[i..]);
+            if (i < samples.len) {
+                if (!self.running.load(.monotonic)) return; // shutting down
+                _ = usleep(2000); // ~2 ms; the audio period is ~27 ms
+            }
+        }
+    }
+
+    pub fn finish(self: *AudioSink, io: std.Io) !void {
+        _ = io;
+        // let the device play out what's buffered before tearing down
+        while (self.running.load(.monotonic) and !self.ring.isEmpty()) {
+            std.Thread.yield() catch std.atomic.spinLoopHint();
+        }
+        audio.sca_audio_destroy(self.handle);
+    }
+};
+
+fn pullCb(ctx: ?*anyopaque, out: [*c]f32, frames: c_uint) callconv(.c) void {
+    const ring: *Ring = @ptrCast(@alignCast(ctx.?));
+    const buf = out[0..frames];
+    const n = ring.pop(buf);
+    for (buf[n..]) |*s| s.* = 0; // underrun -> silence
+}
+
+/// Output endpoint for the pipeline: a WAV file or the live audio device.
+pub const Sink = union(enum) {
+    wav: *WavSink,
+    audio: *AudioSink,
+
+    pub fn writeAudio(self: Sink, samples: []const f32) !void {
+        switch (self) {
+            .wav => |w| try w.writeAudio(samples),
+            .audio => |a| try a.writeAudio(samples),
+        }
+    }
+    pub fn finish(self: Sink, io: std.Io) !void {
+        switch (self) {
+            .wav => |w| try w.finish(io),
+            .audio => |a| try a.finish(io),
+        }
     }
 };
 

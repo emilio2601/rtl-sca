@@ -6,8 +6,12 @@ const FmDemod = @import("fmdemod.zig").FmDemod;
 const fir = @import("firdecim.zig");
 const Deemph = @import("deemph.zig").Deemph;
 const Subcarrier = @import("subcarrier.zig").Subcarrier;
-const FileSource = @import("source.zig").FileSource;
-const WavSink = @import("sink.zig").WavSink;
+const source_mod = @import("source.zig");
+const Source = source_mod.Source;
+const Format = source_mod.Format;
+const sink_mod = @import("sink.zig");
+const Sink = sink_mod.Sink;
+const Running = @import("ring.zig").Running;
 
 const READ_BYTES: usize = 1 << 18; // 256 KiB raw IQ per read
 const MPX_MIN: f64 = 240_000; // §7: keep the MPX above this before extraction
@@ -29,8 +33,6 @@ pub const Pipeline = struct {
     sub: Subcarrier,
     deemph: Deemph,
     audio_gain: f32,
-
-    format: @import("source.zig").Format,
     fs_audio: u32,
 
     // buffers
@@ -69,7 +71,6 @@ pub const Pipeline = struct {
         // atan2 emits radians, not ±1; map the expected deviation toward full scale.
         // Tuned during bring-up; the main MPX baseband is quieter than a demod'd SCA.
         self.audio_gain = if (opts.sub_hz == 0) 3.0 else 1.0;
-        self.format = if (opts.input == .file and std.mem.endsWith(u8, opts.input.file, ".cs16")) .cs16 else .cu8;
         self.fs_audio = AUDIO_RATE;
 
         // ── buffers ──
@@ -97,27 +98,21 @@ pub const Pipeline = struct {
         return na;
     }
 
-    fn unpack(self: *Pipeline, bytes: []const u8) usize {
-        return switch (self.format) {
+    fn unpack(self: *Pipeline, fmt: Format, bytes: []const u8) usize {
+        return switch (fmt) {
             .cu8 => complex.unpackCu8(bytes, self.iq),
             .cs16 => complex.unpackCs16(bytes, self.iq),
         };
     }
 
-    /// Decode `in_path` to a 16 ksps mono WAV at `out_path`.
-    pub fn runFile(self: *Pipeline, io: std.Io, in_path: []const u8, out_path: []const u8) !void {
-        var src: FileSource = undefined;
-        try src.init(io, in_path, self.reader_buf);
-        defer src.close(io);
-
-        var sink: WavSink = undefined;
-        var wbuf: [1 << 16]u8 = undefined;
-        try sink.init(io, out_path, &wbuf, self.fs_audio);
-
-        while (true) {
-            const nb = try src.read(self.block);
-            if (nb == 0) break;
-            const niq = self.unpack(self.block[0..nb]);
+    /// Pump `source` through the DSP into `sink` until the source ends (file EOF)
+    /// or `running` is cleared (SIGINT for live sources), then finalize the sink.
+    pub fn run(self: *Pipeline, io: std.Io, source: Source, sink: Sink, running: *Running) !void {
+        const fmt = source.format();
+        while (running.load(.monotonic)) {
+            const nb = try source.read(self.block);
+            if (nb == 0) break; // EOF (file source)
+            const niq = self.unpack(fmt, self.block[0..nb]);
             const na = self.processIq(self.iq[0..niq]);
             for (self.audio[0..na]) |*s| s.* *= self.audio_gain;
             try sink.writeAudio(self.audio[0..na]);
