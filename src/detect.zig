@@ -53,7 +53,8 @@ pub const ScanConfig = struct {
     sym_hi: f64 = 0.6, // sideband symmetry confirming DSB
     am_snr_db: f64 = 8.0, // AM/DSB is easily faked by noise — demand real SNR
     am_min_bw_hz: f64 = 4000, // DSB of audio is inherently broadband; a narrow symmetric slot is low-dev FM or a data carrier, not DSB
-    wide_junk_hz: f64 = 12_000, // a non-standard region wider than this that classifies as nothing is overload/MPX splatter
+    min_slot_bw_hz: f64 = 1500, // a non-standard slot narrower than this is a single-bin tone spur, not a modulated subcarrier
+    wide_junk_hz: f64 = 12_000, // a non-standard slot wider than this is overload/MPX splatter
 };
 
 const Region = struct { center_hz: f64, bw_hz: f64, peak_bin: usize };
@@ -308,13 +309,14 @@ fn isNamedSlot(center_hz: f64) bool {
         near(center_hz, 67_000, 1500) or near(center_hz, 92_000, 1500);
 }
 
-/// Drop broadband junk the region detector latches onto (overload spurs / MPX splatter).
-/// Standardized slots always pass; otherwise (A) skip noise-level regions and (D) skip
-/// wide regions that classified as nothing — real wide signals classify (stereo ⇒ DSB).
-fn keepSlot(center_hz: f64, snr_db: f64, bw_hz: f64, mod: Modulation, cfg: ScanConfig) bool {
+/// Drop junk the region detector latches onto (overload intermod / MPX splatter).
+/// Standardized slots always pass; otherwise a real subcarrier must clear the SNR gate
+/// and occupy a plausible bandwidth — single-bin tone spurs and broadband splatter (both
+/// overload artifacts) fall outside that window regardless of how they classified.
+fn keepSlot(center_hz: f64, snr_db: f64, bw_hz: f64, _: Modulation, cfg: ScanConfig) bool {
     if (isNamedSlot(center_hz)) return true;
     if (snr_db < cfg.snr_gate_db) return false;
-    if (mod == .unknown and bw_hz > cfg.wide_junk_hz) return false;
+    if (bw_hz < cfg.min_slot_bw_hz or bw_hz > cfg.wide_junk_hz) return false;
     return true;
 }
 
@@ -427,16 +429,18 @@ test "standardized slots assert their modulation regardless of the metric" {
     try testing.expectEqual(Modulation.unknown, stdSlotMod(67_000, .unknown));
 }
 
-test "junk filter drops broadband spurs, keeps real and standardized slots" {
+test "junk filter drops spurs by bandwidth, keeps real and standardized slots" {
     const cfg = ScanConfig{};
     // standardized slots always pass — even the wide 38 kHz stereo and weak named slots
     try testing.expect(keepSlot(38_000, 1, 30_000, .am_dsb, cfg));
     try testing.expect(keepSlot(67_000, 2, 6_000, .fm, cfg));
-    // A: non-standard noise-level region (the 101 kHz +1 dB spur)
+    // noise-level non-standard region
     try testing.expect(!keepSlot(101_000, 1, 17_400, .unknown, cfg));
-    // D: non-standard wide unknown even at decent SNR (the 32 kHz +9 dB / 14.5 kHz spur)
-    try testing.expect(!keepSlot(32_000, 9, 14_500, .unknown, cfg));
-    // a real non-standard narrow signal that classified is kept
+    // single-bin tone spur (overload intermod) classified fm — dropped by the bw floor
+    try testing.expect(!keepSlot(71_000, 5, 100, .fm, cfg));
+    // broadband splatter classified fm — dropped by the bw ceiling
+    try testing.expect(!keepSlot(35_000, 8, 19_300, .fm, cfg));
+    // a real non-standard subcarrier with a plausible bandwidth is kept
     try testing.expect(keepSlot(80_000, 10, 6_000, .fm, cfg));
 }
 
