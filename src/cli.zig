@@ -26,6 +26,7 @@ pub const Options = struct {
     device: u32 = 0, // USB dongle index
     ppm: i32 = 0, // crystal correction
     out: ?[]const u8 = null,
+    verbose: u8 = 0, // -v count: 0 normal, 1 per-slot classifier metrics (scan)
 };
 
 pub const Error = error{
@@ -66,7 +67,9 @@ pub fn parse(args: []const [:0]const u8) Error!Options {
                 inline_val = tok[eq + 1 ..];
             }
 
-            if (std.mem.eql(u8, name, "--source")) {
+            if (verboseCount(name)) |n| {
+                o.verbose +|= n; // saturating: -v, -vv, ... and --verbose all add up
+            } else if (std.mem.eql(u8, name, "--source")) {
                 source_path = try value(args, &i, inline_val);
             } else if (std.mem.eql(u8, name, "--rtl-tcp")) {
                 o.rtl_tcp = try value(args, &i, inline_val);
@@ -115,6 +118,17 @@ pub fn parse(args: []const [:0]const u8) Error!Options {
 
     if (command == .rec and o.out == null) return error.MissingOutput;
     return o;
+}
+
+/// Count repeated-`v` verbosity: `-v`→1, `-vv`→2, …, and `--verbose`→1. Returns null
+/// for anything else (so `-o`, `--source`, etc. fall through to their own handlers).
+fn verboseCount(name: []const u8) ?u8 {
+    if (std.mem.eql(u8, name, "--verbose")) return 1;
+    if (name.len >= 2 and name[0] == '-' and name[1] != '-') {
+        for (name[1..]) |c| if (c != 'v') return null;
+        return @intCast(name.len - 1);
+    }
+    return null;
 }
 
 /// Consume a flag's value: inline (`--flag=v`) if present, else the next token.
@@ -256,6 +270,17 @@ test "rate is allowed with a file source" {
     const args = [_][:0]const u8{ "rtl-sca", "play", "capture.cu8", "--rate", "1.024M" };
     const o = try parse(&args);
     try testing.expectEqual(@as(u32, 1_024_000), o.rate_hz);
+}
+
+test "verbose count: -v, -vv, --verbose, and non-verbose short flags" {
+    try testing.expectEqual(@as(u8, 1), (try parse(&[_][:0]const u8{ "rtl-sca", "scan", "89.9M", "-v" })).verbose);
+    try testing.expectEqual(@as(u8, 2), (try parse(&[_][:0]const u8{ "rtl-sca", "scan", "89.9M", "-vv" })).verbose);
+    try testing.expectEqual(@as(u8, 1), (try parse(&[_][:0]const u8{ "rtl-sca", "scan", "89.9M", "--verbose" })).verbose);
+    try testing.expectEqual(@as(u8, 0), (try parse(&[_][:0]const u8{ "rtl-sca", "scan", "89.9M" })).verbose);
+    // -o is not a verbose flag
+    try testing.expectEqualStrings("o.wav", (try parse(&[_][:0]const u8{ "rtl-sca", "rec", "89.9M", "-o", "o.wav" })).out.?);
+    // a non-all-v short token is still an unknown flag
+    try testing.expectError(error.UnknownFlag, parse(&[_][:0]const u8{ "rtl-sca", "scan", "89.9M", "-vx" }));
 }
 
 test "inline --flag=value form" {

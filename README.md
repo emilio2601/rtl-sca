@@ -77,6 +77,7 @@ Key flags (run `rtl-sca` with no command for the full list):
 | `--device N` | USB dongle index (radio only) | `0` |
 | `--ppm N` | crystal correction in ppm (radio only) | `0` |
 | `-o FILE` | output WAV path (`rec`) | — |
+| `-v` | verbose: per-slot classifier metrics (`scan`) | off |
 
 De-emphasis is a continuous time constant, not a fixed set. `150us` is the SCA
 standard (the default); `75us` (US) and `50us` (EU) are the main-channel values;

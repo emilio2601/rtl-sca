@@ -38,6 +38,7 @@ const usage =
     \\  --device N        USB dongle index (default 0)
     \\  --ppm N           crystal frequency correction, ppm (default 0)
     \\  -o FILE           output WAV path (rec)
+    \\  -v                verbose: show per-slot classifier metrics (scan)
     \\
     \\examples:
     \\  rtl-sca scan 89.9M
@@ -180,10 +181,10 @@ fn runScan(init: std.process.Init, w: *Io.Writer, opts: cli.Options) !void {
 
     var res = detect.scan(init.gpa, mpx[0..filled], .{ .fs_mpx = fe.fs_mpx }) catch |err| reportRun(w, err);
     defer res.deinit();
-    try printScan(w, res);
+    try printScan(w, res, opts.verbose);
 }
 
-fn printScan(w: *Io.Writer, res: detect.ScanResult) !void {
+fn printScan(w: *Io.Writer, res: detect.ScanResult, verbose: u8) !void {
     if (res.stereo) {
         try w.print("stereo : yes (pilot +{d:.0} dB)\n", .{res.pilot_snr_db});
     } else {
@@ -194,7 +195,24 @@ fn printScan(w: *Io.Writer, res: detect.ScanResult) !void {
         return;
     }
     try w.writeAll("\nslot      mod       bw         snr     guess\n");
-    for (res.slots) |s| try w.print("{f}\n", .{s});
+    for (res.slots) |s| {
+        try w.print("{f}\n", .{s});
+        if (verbose >= 1) try printSlotMetrics(w, s.metrics);
+    }
+}
+
+/// `-v`: the metrics behind each verdict — FM keys on `audio` clearing its gate, DSB on
+/// `carrier` going negative (suppressed) with `sym`/`cv`. NaN ⇒ slot fell out before
+/// extraction (below the SNR gate).
+fn printSlotMetrics(w: *Io.Writer, m: detect.SlotMetrics) !void {
+    const g = detect.ScanConfig{};
+    if (std.math.isNan(m.cv_env)) {
+        try w.writeAll("          \u{2514} (not classified — below SNR gate / too little data)\n");
+        return;
+    }
+    try w.print("          \u{2514} audio {d:.2} (gate {d:.1})  carrier {d:.1} dB (DSB < {d:.1})  cv {d:.2}  sym {d:.2}\n", .{
+        m.audio_db, g.aud_gate_db, m.carrier_db, g.carr_null_db, m.cv_env, m.sym,
+    });
 }
 
 var g_running: ?*Running = null;
