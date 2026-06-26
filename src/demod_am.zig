@@ -6,7 +6,7 @@ const C32 = @import("complex.zig").C32;
 /// (use AmCoherent for clean DSB). One output per input.
 pub const AmEnv = struct {
     dc: f32 = 0,
-    const dc_a: f32 = 0.001; // DC/low-frequency tracker
+    const dc_a: f32 = 0.001;
 
     pub fn process(self: *AmEnv, z: []const C32, out: []f32) usize {
         std.debug.assert(out.len >= z.len);
@@ -40,7 +40,9 @@ pub const AmCoherent = struct {
             const sn = @sin(self.phase);
             const in_i = c.re * cs + c.im * sn; // derotate by -phase
             const qd = c.im * cs - c.re * sn;
-            const err = in_i * qd; // DSB/BPSK phase detector ∝ sin(2·error)
+            // Amplitude-normalized phase detector = ½·sin(2·error); without the
+            // 1/power the loop gain swings with the signal and goes unstable.
+            const err = (in_i * qd) / (in_i * in_i + qd * qd + 1e-6);
             self.freq = std.math.clamp(self.freq + beta * err, -freq_clamp, freq_clamp);
             self.phase += self.freq + alpha * err;
             if (self.phase > std.math.pi) self.phase -= 2 * std.math.pi;
