@@ -292,4 +292,5 @@ test {
     _ = @import("frontend.zig");
     _ = @import("detect.zig");
     _ = @import("complex.zig");
+    _ = @import("demod_am.zig");
 }

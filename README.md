@@ -89,7 +89,8 @@ standard (the default); `75us` (US) and `50us` (EU) are the main-channel values;
 | 1 | Offline MVP: file source → FM demod → 67 kHz FM subcarrier → de-emphasis → WAV | ✅ |
 | 2 | Live: `rtl_tcp` network source + audio playback via miniaudio (USB source deferred) | ✅ |
 | 4 | `scan` survey mode: PSD, pilot/slot detection, AM-vs-FM classification, SNR | ✅ |
-| 3 | Configurable modulation; AM demod paths (`am-env`, `am-coherent`); `UsbSource` | |
+| 3 | AM demod paths (`am-env`, `am-coherent` Costas); configurable `--mod` | ✅ |
+| — | `UsbSource` (local librtlsdr) — deferred; Pi + `rtl_tcp` covers live | |
 | 5 | Stretch: RDS decode, headless Pi daemon, arbitrary-rate resampler | |
 
 ## Project layout

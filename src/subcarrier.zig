@@ -1,13 +1,35 @@
 const std = @import("std");
 const C32 = @import("complex.zig").C32;
 const FmDemod = @import("fmdemod.zig").FmDemod;
+const am = @import("demod_am.zig");
 const fir = @import("firdecim.zig");
 const Nco = @import("nco.zig").Nco;
+const Mod = @import("cli.zig").Mod;
 
 const FirR = fir.FirDecim(f32);
 const FirC = fir.FirDecim(C32);
 
 pub const Error = fir.BuildError;
+
+/// Channel demodulator for the extracted complex baseband, selected by `--mod`.
+const Demod = union(enum) {
+    fm: FmDemod,
+    am_env: am.AmEnv,
+    am_coherent: am.AmCoherent,
+
+    fn fromMod(m: Mod) Demod {
+        return switch (m) {
+            .fm => .{ .fm = .{} },
+            .am_env => .{ .am_env = .{} },
+            .am_coherent => .{ .am_coherent = .{} },
+        };
+    }
+    fn process(self: *Demod, z: []const C32, out: []f32) usize {
+        switch (self.*) {
+            inline else => |*d| return d.process(z, out),
+        }
+    }
+};
 
 /// Stage 2 of the chain: take the 256 ksps MPX down to 16 ksps audio. The SCA
 /// branch mixes the slot to DC, filters complex, and FM-demods it; the main
@@ -20,7 +42,7 @@ pub const Subcarrier = union(enum) {
     const Sca = struct {
         nco: Nco,
         fir2: FirC,
-        demod: FmDemod,
+        demod: Demod,
         mixed: []C32,
         chan: []C32,
     };
@@ -37,6 +59,7 @@ pub const Subcarrier = union(enum) {
         fs_mpx: f64,
         d2: usize,
         max_in: usize,
+        mod: Mod,
     ) Error!Subcarrier {
         const cutoff: f64 = @as(f64, @floatFromInt(bw_hz)) / 2.0;
         if (cutoff <= 0) return error.BadBandwidth;
@@ -58,7 +81,7 @@ pub const Subcarrier = union(enum) {
         return .{ .sca = .{
             .nco = Nco.init(@floatFromInt(sub_hz), fs_mpx),
             .fir2 = fir2,
-            .demod = .{},
+            .demod = Demod.fromMod(mod),
             .mixed = mixed,
             .chan = chan,
         } };
@@ -105,7 +128,7 @@ test "SCA branch recovers a 1 kHz tone from a 67 kHz FM subcarrier" {
     var mpx: [n]f32 = undefined;
     tu.fmTone(&mpx, 67000, 1000, 3000, 256000); // 67k carrier, 1k tone, 3k dev
 
-    var sub = try Subcarrier.init(arena.allocator(), 67000, 8000, 256000, 16, n);
+    var sub = try Subcarrier.init(arena.allocator(), 67000, 8000, 256000, 16, n, .fm);
     var audio: [n / 16 + 2]f32 = undefined;
     const na = sub.process(&mpx, &audio);
 
@@ -123,7 +146,7 @@ test "main branch recovers a baseband tone with no NCO/second demod" {
         s.* = @floatCast(@cos(2.0 * std.math.pi * 1000.0 * @as(f64, @floatFromInt(i)) / 256000.0));
     }
 
-    var sub = try Subcarrier.init(arena.allocator(), 0, 15000, 256000, 16, n);
+    var sub = try Subcarrier.init(arena.allocator(), 0, 15000, 256000, 16, n, .fm);
     var audio: [n / 16 + 2]f32 = undefined;
     const na = sub.process(&mpx, &audio);
 
