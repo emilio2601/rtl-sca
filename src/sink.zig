@@ -108,6 +108,13 @@ fn pullCb(ctx: ?*anyopaque, out: [*c]f32, frames: c_uint) callconv(.c) void {
     for (buf[n..]) |*s| s.* = 0; // underrun -> silence
 }
 
+/// Native sample rate of the default playback device, or 0 if none is available.
+/// Lets the caller resample to the device rate instead of leaving an opaque
+/// conversion to miniaudio's mixer.
+pub fn defaultDeviceRate() u32 {
+    return @intCast(audio.sca_audio_default_rate());
+}
+
 /// Output endpoint for the pipeline: a WAV file or the live audio device.
 pub const Sink = union(enum) {
     wav: *WavSink,

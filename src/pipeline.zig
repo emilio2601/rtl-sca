@@ -5,6 +5,8 @@ const C32 = complex.C32;
 const fir = @import("firdecim.zig");
 const Deemph = @import("deemph.zig").Deemph;
 const Subcarrier = @import("subcarrier.zig").Subcarrier;
+const rateplan = @import("rateplan.zig");
+const Resampler = @import("resampler.zig").Resampler;
 const frontend_mod = @import("frontend.zig");
 const Frontend = frontend_mod.Frontend;
 const source_mod = @import("source.zig");
@@ -15,9 +17,8 @@ const Sink = sink_mod.Sink;
 const Running = @import("ring.zig").Running;
 
 const READ_BYTES: usize = 1 << 18; // 256 KiB raw IQ per read
-const AUDIO_RATE: u32 = 16_000; // §12
 
-pub const InitError = error{SubcarrierAboveNyquist} || frontend_mod.Error;
+pub const InitError = error{SubcarrierAboveNyquist} || frontend_mod.Error || rateplan.Error;
 
 /// The full offline `rec` chain. Owns an arena holding every DSP buffer, sized
 /// once at init; the per-sample path never allocates.
@@ -27,6 +28,8 @@ pub const Pipeline = struct {
     frontend: Frontend,
     sub: Subcarrier,
     deemph: Deemph,
+    resampler: Resampler,
+    plan: rateplan.RatePlan,
     audio_gain: f32,
     fs_audio: u32,
 
@@ -34,7 +37,8 @@ pub const Pipeline = struct {
     reader_buf: []u8,
     block: []u8,
     iq: []C32,
-    mpx256: []f32,
+    mpx: []f32,
+    chan: []f32, // subcarrier output at fs_chan, pre-resample
     audio: []f32,
 
     pub fn init(self: *Pipeline, base: std.mem.Allocator, opts: cli.Options) InitError!void {
@@ -43,33 +47,39 @@ pub const Pipeline = struct {
         const a = self.arena.allocator();
         const max_iq = READ_BYTES / 2;
 
-        // Front-end derives d1/fs_mpx and owns IQ→MPX (SPEC §4 rate plan).
-        self.frontend = try Frontend.init(a, opts.rate_hz, max_iq);
-        const fs_mpx = self.frontend.fs_mpx;
-        const d1 = self.frontend.d1;
+        // One planner owns the whole rate chain (SPEC §4 rate plan).
+        // null reaches here only for `rec` (play resolves the device rate first);
+        // file output defaults to 48 kHz.
+        const fs_audio_target = opts.audio_rate_hz orelse 48_000;
+        const plan = try rateplan.plan(opts.rate_hz, fs_audio_target, opts.bw_hz);
+        self.frontend = try Frontend.init(a, plan, max_iq);
+        const fs_mpx = plan.fs_mpx;
 
         const slot_edge: f64 = @floatFromInt(opts.sub_hz + opts.bw_hz / 2);
         if (slot_edge >= fs_mpx * 0.43) return error.SubcarrierAboveNyquist;
 
-        const fs_mpx_u: u32 = @intFromFloat(fs_mpx);
-        if (fs_mpx_u % AUDIO_RATE != 0) return error.RateNotDivisible;
-        const d2: usize = fs_mpx_u / AUDIO_RATE;
-
         // ── stages ──
-        const max_mpx256 = max_iq / d1 + 2;
-        self.sub = try Subcarrier.init(a, opts.sub_hz, opts.bw_hz, fs_mpx, d2, max_mpx256, opts.mod);
-        self.deemph = Deemph.init(opts.deemph_us, AUDIO_RATE);
+        const max_mpx = self.frontend.outCap(max_iq);
+        const max_chan = max_mpx / plan.d2 + 2;
+        self.sub = try Subcarrier.init(a, opts.sub_hz, opts.bw_hz, fs_mpx, plan.d2, max_mpx, opts.mod);
+        // De-emphasis runs at fs_chan; the resampler then converts to fs_audio,
+        // preserving the analog corner (SPEC §5).
+        self.deemph = Deemph.init(opts.deemph_us, plan.fs_chan);
+        const cutoff_rs = 0.45 * @min(plan.fs_chan, @as(f64, @floatFromInt(plan.fs_audio)));
+        self.resampler = try Resampler.build(a, plan.fs_chan, plan.resamp.l, plan.resamp.m, cutoff_rs);
         // atan2 emits radians, not ±1; map the expected deviation toward full scale.
         // The main MPX baseband is quieter than a demod'd SCA, so it needs more gain.
         self.audio_gain = if (opts.sub_hz == 0) 3.0 else 1.0;
-        self.fs_audio = AUDIO_RATE;
+        self.plan = plan;
+        self.fs_audio = plan.fs_audio;
 
         // ── buffers ──
         self.reader_buf = try a.alloc(u8, 1 << 16);
         self.block = try a.alloc(u8, READ_BYTES);
         self.iq = try a.alloc(C32, max_iq);
-        self.mpx256 = try a.alloc(f32, max_mpx256);
-        self.audio = try a.alloc(f32, max_iq / (d1 * d2) + 4);
+        self.mpx = try a.alloc(f32, max_mpx);
+        self.chan = try a.alloc(f32, max_chan);
+        self.audio = try a.alloc(f32, max_chan * plan.resamp.l / plan.resamp.m + 2);
     }
 
     pub fn deinit(self: *Pipeline) void {
@@ -80,10 +90,10 @@ pub const Pipeline = struct {
     /// lands in self.audio[0..return]; gain is NOT applied (callers that play it
     /// out apply gain, tests read it raw).
     fn processIq(self: *Pipeline, iq: []const C32) usize {
-        const n256 = self.frontend.process(iq, self.mpx256);
-        const na = self.sub.process(self.mpx256[0..n256], self.audio);
-        self.deemph.process(self.audio[0..na]);
-        return na;
+        const n_mpx = self.frontend.process(iq, self.mpx);
+        const n_chan = self.sub.process(self.mpx[0..n_mpx], self.chan);
+        self.deemph.process(self.chan[0..n_chan]);
+        return self.resampler.process(self.chan[0..n_chan], self.audio);
     }
 
     fn unpack(self: *Pipeline, fmt: Format, bytes: []const u8) usize {
@@ -114,14 +124,16 @@ const testing = std.testing;
 const tu = @import("testutil.zig");
 
 fn testOpts(sub_hz: u32, bw_hz: u32) cli.Options {
-    return .{ .command = .rec, .input = .{ .file = "x.cu8" }, .sub_hz = sub_hz, .bw_hz = bw_hz, .deemph_us = 0, .rate_hz = 1_024_000 };
+    return .{ .command = .rec, .input = .{ .file = "x.cu8" }, .sub_hz = sub_hz, .bw_hz = bw_hz, .deemph_us = 0, .rate_hz = 1_024_000, .audio_rate_hz = 16_000 };
 }
 
-test "rate derivation rejects non-divisible rates" {
+test "non-divisible rate now resamples instead of being rejected" {
     var p: Pipeline = undefined;
     var o = testOpts(67000, 8000);
-    o.rate_hz = 1_000_000; // 250k/16000 not integer
-    try testing.expectError(error.RateNotDivisible, p.init(testing.allocator, o));
+    o.rate_hz = 1_000_000; // 250k → 16k is 128/125, handled by the resampler
+    try p.init(testing.allocator, o);
+    defer p.deinit();
+    try testing.expectEqual(@as(u32, 16_000), p.fs_audio);
 }
 
 test "integration: full chain recovers a 1 kHz tone through a 67 kHz SCA" {
@@ -147,6 +159,32 @@ test "integration: full chain recovers a 1 kHz tone through a 67 kHz SCA" {
 
     const na = p.processIq(iq);
     const dom = tu.toneDominance(p.audio[256..na], 1000, 2500, 16000);
+    try testing.expect(dom > 30);
+}
+
+test "integration: 48 kHz output recovers the SCA tone through the resampler" {
+    var p: Pipeline = undefined;
+    var o = testOpts(67000, 8000);
+    o.audio_rate_hz = 48_000; // 256k→fs_chan→48k via a 15/16 resampler
+    try p.init(testing.allocator, o);
+    defer p.deinit();
+    try testing.expectEqual(@as(u32, 48_000), p.fs_audio);
+
+    const n = READ_BYTES / 2;
+    const iq = try testing.allocator.alloc(C32, n);
+    defer testing.allocator.free(iq);
+    const fs = 1_024_000.0;
+    var ph: f64 = 0;
+    for (iq, 0..) |*c, k| {
+        const t = @as(f64, @floatFromInt(k)) / fs;
+        const pilot = 0.1 * @cos(2.0 * std.math.pi * 19000.0 * t);
+        const sca = 0.3 * @cos(2.0 * std.math.pi * 67000.0 * t + 3.0 * @sin(2.0 * std.math.pi * 1000.0 * t));
+        ph += 2.0 * std.math.pi * (75000.0 * (pilot + sca)) / fs;
+        c.* = .{ .re = @floatCast(@cos(ph)), .im = @floatCast(@sin(ph)) };
+    }
+
+    const na = p.processIq(iq);
+    const dom = tu.toneDominance(p.audio[768..na], 1000, 2500, 48000);
     try testing.expect(dom > 30);
 }
 

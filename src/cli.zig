@@ -22,6 +22,10 @@ pub const Options = struct {
     /// alpha = dt/(tau+dt), computed at the audio rate. Default 150us (SCA).
     deemph_us: f64 = 150,
     rate_hz: u32 = 1_024_000,
+    /// Audio output sample rate in Hz, or null to resolve per command: file
+    /// output defaults to 48000; live playback negotiates the device's native
+    /// rate. A rational resampler bridges the internal content rate to it.
+    audio_rate_hz: ?u32 = null,
     gain: ?f32 = null, // null = auto
     device: u32 = 0, // USB dongle index
     ppm: i32 = 0, // crystal correction
@@ -80,6 +84,8 @@ pub fn parse(args: []const [:0]const u8) Error!Options {
                 o.bw_hz = try parseFreq(try value(args, &i, inline_val));
             } else if (std.mem.eql(u8, name, "--rate")) {
                 o.rate_hz = try parseFreq(try value(args, &i, inline_val));
+            } else if (std.mem.eql(u8, name, "--audio-rate")) {
+                o.audio_rate_hz = try parseFreq(try value(args, &i, inline_val));
             } else if (std.mem.eql(u8, name, "--mod")) {
                 o.mod = parseMod(try value(args, &i, inline_val)) orelse return error.BadMod;
             } else if (std.mem.eql(u8, name, "--deemph")) {
@@ -270,6 +276,15 @@ test "rate is allowed with a file source" {
     const args = [_][:0]const u8{ "rtl-sca", "play", "capture.cu8", "--rate", "1.024M" };
     const o = try parse(&args);
     try testing.expectEqual(@as(u32, 1_024_000), o.rate_hz);
+}
+
+test "audio-rate flag and its default" {
+    // Unset: resolved per command downstream (file 48k / device-native), not here.
+    const dflt = [_][:0]const u8{ "rtl-sca", "play", "89.9M" };
+    try testing.expectEqual(@as(?u32, null), (try parse(&dflt)).audio_rate_hz);
+
+    const set = [_][:0]const u8{ "rtl-sca", "play", "89.9M", "--audio-rate", "16k" };
+    try testing.expectEqual(@as(?u32, 16_000), (try parse(&set)).audio_rate_hz);
 }
 
 test "verbose count: -v, -vv, --verbose, and non-verbose short flags" {

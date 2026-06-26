@@ -44,3 +44,15 @@ void sca_audio_destroy(sca_audio *a) {
     if (a->started) ma_device_uninit(&a->dev);
     free(a);
 }
+
+unsigned int sca_audio_default_rate(void) {
+    ma_device_config cfg = ma_device_config_init(ma_device_type_playback);
+    cfg.playback.format = ma_format_f32;
+    cfg.playback.channels = 1;
+    cfg.sampleRate = 0; /* 0 => miniaudio fills dev.sampleRate with the native rate */
+    ma_device dev;
+    if (ma_device_init(NULL, &cfg, &dev) != MA_SUCCESS) return 0;
+    unsigned int rate = dev.sampleRate;
+    ma_device_uninit(&dev);
+    return rate;
+}

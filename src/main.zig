@@ -7,6 +7,7 @@ const Running = ring_mod.Running;
 const source_mod = @import("source.zig");
 const sink_mod = @import("sink.zig");
 const frontend_mod = @import("frontend.zig");
+const rateplan = @import("rateplan.zig");
 const detect = @import("detect.zig");
 const complex = @import("complex.zig");
 
@@ -34,6 +35,7 @@ const usage =
     \\  --deemph TAU      de-emphasis time constant, e.g. 120us; off=none
     \\                    (default 150us SCA; 75us US, 50us EU main channel)
     \\  --rate HZ         RTL sample rate (default 1.024M)
+    \\  --audio-rate HZ   audio output rate (default 48k; e.g. 16k for small files)
     \\  --gain DB         tuner gain (default auto)
     \\  --device N        USB dongle index (default 0)
     \\  --ppm N           crystal frequency correction, ppm (default 0)
@@ -78,6 +80,10 @@ fn runRec(init: std.process.Init, w: *Io.Writer, opts: cli.Options) !void {
     var p: pipeline.Pipeline = undefined;
     p.init(init.gpa, opts) catch |err| reportInit(w, err);
     defer p.deinit();
+    if (opts.verbose > 0) {
+        try printRatePlan(w, p.plan, true);
+        try w.flush();
+    }
 
     var wsink: sink_mod.WavSink = undefined;
     var wbuf: [1 << 16]u8 = undefined;
@@ -90,11 +96,23 @@ fn runRec(init: std.process.Init, w: *Io.Writer, opts: cli.Options) !void {
 }
 
 fn runPlay(init: std.process.Init, w: *Io.Writer, opts: cli.Options) !void {
-    var p: pipeline.Pipeline = undefined;
-    p.init(init.gpa, opts) catch |err| reportInit(w, err);
-    defer p.deinit();
+    // Live playback: unless the user pinned --audio-rate, target the device's
+    // native rate so our resampler owns the conversion, not miniaudio's mixer.
+    var o = opts;
+    if (o.audio_rate_hz == null) {
+        const native = sink_mod.defaultDeviceRate();
+        if (native != 0) o.audio_rate_hz = native;
+    }
 
-    var ring_buf: [1 << 15]f32 = undefined; // ~2 s at 16 kHz
+    var p: pipeline.Pipeline = undefined;
+    p.init(init.gpa, o) catch |err| reportInit(w, err);
+    defer p.deinit();
+    if (opts.verbose > 0) {
+        try printRatePlan(w, p.plan, true);
+        try w.flush();
+    }
+
+    var ring_buf: [1 << 15]f32 = undefined; // ~0.7 s at 48 kHz
     var ring = ring_mod.Ring.init(&ring_buf);
     var running = Running.init(true);
     var asink: sink_mod.AudioSink = undefined;
@@ -148,14 +166,19 @@ fn runScan(init: std.process.Init, w: *Io.Writer, opts: cli.Options) !void {
     const a = arena.allocator();
 
     const max_iq = scan_read_bytes / 2;
-    var fe = frontend_mod.Frontend.init(a, opts.rate_hz, max_iq) catch |err| reportInit(w, err);
+    const plan = rateplan.plan(opts.rate_hz, opts.audio_rate_hz orelse 48_000, opts.bw_hz) catch |err| reportInit(w, err);
+    var fe = frontend_mod.Frontend.init(a, plan, max_iq) catch |err| reportInit(w, err);
+    if (opts.verbose > 0) {
+        try printRatePlan(w, plan, false);
+        try w.flush();
+    }
 
     const cap: usize = scan_seconds * @as(usize, @intFromFloat(fe.fs_mpx));
     const mpx = try a.alloc(f32, cap);
     const block = try a.alloc(u8, scan_read_bytes);
     const iq = try a.alloc(complex.C32, max_iq);
     const reader_buf = try a.alloc(u8, 1 << 16);
-    const mpx_tmp = try a.alloc(f32, max_iq / fe.d1 + 2);
+    const mpx_tmp = try a.alloc(f32, fe.outCap(max_iq));
 
     var fsrc: source_mod.FileSource = undefined;
     var rsrc: source_mod.RtlTcpSource = undefined;
@@ -255,7 +278,6 @@ fn reportRun(w: *Io.Writer, err: anyerror) noreturn {
 
 fn pipelineErrorText(err: pipeline.InitError) []const u8 {
     return switch (err) {
-        error.RateNotDivisible => "sample rate must divide to 16 kHz audio (try --rate 1.024M)",
         error.NyquistTrap => "sample rate too low to extract the subcarrier safely",
         error.SubcarrierAboveNyquist => "subcarrier + bandwidth falls outside the usable MPX band",
         error.FilterTooSharp => "requested bandwidth needs an impractically sharp filter",
@@ -264,38 +286,14 @@ fn pipelineErrorText(err: pipeline.InitError) []const u8 {
     };
 }
 
-fn printPlan(w: *Io.Writer, o: cli.Options) !void {
-    try w.print("command : {t}\n", .{o.command});
-    switch (o.input) {
-        .freq => |hz| {
-            if (o.rtl_tcp) |hp| {
-                try w.print("source  : rtl_tcp {s} @ {d} Hz\n", .{ hp, hz });
-            } else {
-                try w.print("source  : radio dev {d} @ {d} Hz\n", .{ o.device, hz });
-            }
-            if (o.gain) |g| {
-                try w.print("gain    : {d} dB\n", .{g});
-            } else {
-                try w.writeAll("gain    : auto\n");
-            }
-            try w.print("ppm     : {d}\n", .{o.ppm});
-        },
-        .file => |path| try w.print("source  : file {s}\n", .{path}),
+/// Dump the derived rate chain (under -v). `audio_stages` is false for `scan`,
+/// which only runs the IQ→MPX front-end and never reaches the channel/output.
+fn printRatePlan(w: *Io.Writer, p: rateplan.RatePlan, audio_stages: bool) !void {
+    try w.print("plan    : IQ {d:.0} → demod {d:.0} (÷{d}) → MPX {d:.0} (÷{d})", .{ p.fs_iq, p.fs_demod, p.d0, p.fs_mpx, p.d1 });
+    if (audio_stages) {
+        try w.print(" → chan {d:.0} (÷{d}) → out {d} (×{d}/{d})", .{ p.fs_chan, p.d2, p.fs_audio, p.resamp.l, p.resamp.m });
     }
-    if (o.sub_hz == 0) {
-        try w.writeAll("sub     : 0 Hz (main channel)\n");
-    } else {
-        try w.print("sub     : {d} Hz\n", .{o.sub_hz});
-    }
-    try w.print("bw      : {d} Hz\n", .{o.bw_hz});
-    try w.print("mod     : {t}\n", .{o.mod});
-    if (o.deemph_us == 0) {
-        try w.writeAll("deemph  : off\n");
-    } else {
-        try w.print("deemph  : {d}us\n", .{o.deemph_us});
-    }
-    try w.print("rate    : {d} Hz\n", .{o.rate_hz});
-    if (o.out) |path| try w.print("out     : {s}\n", .{path});
+    try w.writeAll(" Hz\n");
 }
 
 test {
