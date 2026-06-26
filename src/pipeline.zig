@@ -60,7 +60,7 @@ pub const Pipeline = struct {
         self.sub = try Subcarrier.init(a, opts.sub_hz, opts.bw_hz, fs_mpx, d2, max_mpx256, opts.mod);
         self.deemph = Deemph.init(opts.deemph_us, AUDIO_RATE);
         // atan2 emits radians, not ±1; map the expected deviation toward full scale.
-        // Tuned during bring-up; the main MPX baseband is quieter than a demod'd SCA.
+        // The main MPX baseband is quieter than a demod'd SCA, so it needs more gain.
         self.audio_gain = if (opts.sub_hz == 0) 3.0 else 1.0;
         self.fs_audio = AUDIO_RATE;
 
