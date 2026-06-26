@@ -144,22 +144,34 @@ Algorithm:
 1. FM demod the MPX, compute an averaged PSD (Welch) over 0–100 kHz.
 2. Detect the **19 kHz pilot** (⇒ stereo present).
 3. Find energy peaks near **57, 67, 92 kHz** (and report any other strong slots).
-4. For each detected subcarrier, **classify modulation**:
-   - Extract the slot, form the analytic signal.
-   - Compare **envelope (amplitude) variance** vs **instantaneous-frequency variance**.
-   - Test **sideband symmetry** about the slot center in the PSD.
-   - **Symmetric sidebands + high amplitude variance + low freq deviation ⇒ AM/DSB.**
-   - **Constant envelope + frequency deviation ⇒ FM.**
+4. For each detected subcarrier, **classify modulation** (FM is the default for US audio
+   subcarriers; commit to DSB only on positive evidence):
+   - Extract the slot to complex baseband.
+   - **Audio-likeness** (the FM discriminant): FM-demod the slot; a real audio program
+     concentrates in the low band, while demod noise has the rising "triangular" PSD
+     (∝ f²). Low/high band power ratio above threshold ⇒ **FM**. Deviation-independent,
+     so low-deviation SCAs still pass.
+   - **Carrier presence**: a suppressed-carrier DSB has a spectral null at center; FM and
+     carrier-AM have a center spike. Null + symmetric sidebands + broadband + real SNR
+     ⇒ **AM/DSB** (the 38 kHz stereo L−R).
+   - Otherwise (not audio-like, not DSB) ⇒ **unknown** (noise, data, or a bare carrier).
 5. Estimate per-slot bandwidth and SNR.
+
+Labels stick to facts: standardized pilot-locked assignments (38 kHz stereo, 57 kHz RDS)
+and the measured modulation — never guessed content (a reading service vs music).
 
 Output a table, e.g.:
 
 ```
-slot     mod     bw       snr     guess
-67 kHz   FM      ~5 kHz   18 dB   audio SCA (reading service)
-92 kHz   AM/DSB  ~2 kHz   6 dB    weak — possible bleedthrough
-57 kHz   FM      ~4 kHz   12 dB   data (RDS)
+slot     mod      bw       snr     guess
+67 kHz   fm       ~5 kHz   18 dB   audio SCA
+38 kHz   am_dsb   ~8 kHz   12 dB   stereo subcarrier (L−R)
+57 kHz   data     ~3 kHz    9 dB   data subcarrier (RDS)
 ```
+
+Standardized slots (38 kHz stereo, 57 kHz RDS) assert their known modulation rather than
+trust the metric. The report also filters broadband junk — non-standard regions that are
+noise-level, or wide and unclassified, are overload/MPX splatter, not subcarriers.
 
 ---
 

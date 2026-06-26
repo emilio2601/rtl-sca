@@ -5,7 +5,17 @@ const Nco = @import("nco.zig").Nco;
 const fir = @import("firdecim.zig");
 const FmDemod = @import("fmdemod.zig").FmDemod;
 
-pub const Modulation = enum { fm, am_dsb, unknown };
+pub const Modulation = enum { fm, am_dsb, data, unknown };
+
+/// The metrics behind a classification, surfaced for `scan -v`. NaN ⇒ not computed
+/// (the slot returned before extraction, e.g. below the SNR gate).
+pub const SlotMetrics = struct {
+    cv_env: f64 = nan,
+    audio_db: f64 = nan,
+    carrier_db: f64 = nan,
+    sym: f64 = nan,
+    const nan = std.math.nan(f64);
+};
 
 pub const SlotReport = struct {
     center_hz: f64,
@@ -13,6 +23,7 @@ pub const SlotReport = struct {
     bw_hz: f64,
     snr_db: f64,
     guess: []const u8,
+    metrics: SlotMetrics = .{},
 
     pub fn format(self: SlotReport, w: *std.Io.Writer) std.Io.Writer.Error!void {
         try w.print("{d:>3.0} kHz  {t:<8} ~{d:>4.1} kHz  {d:>4.0} dB  {s}", .{
@@ -43,12 +54,13 @@ pub const ScanConfig = struct {
     slot_gate_db: f64 = 6.0, // region threshold above the global floor
     named_gate_db: f64 = 2.0, // lower gate when probing the canonical 57/67/92 slots
     pilot_gate_db: f64 = 10.0,
-    cv_hi: f64 = 0.35, // envelope coefficient-of-variation: above ⇒ AM/DSB
-    cv_lo: f64 = 0.30, // below ⇒ constant envelope ⇒ FM
-    dev_hi_hz: f64 = 1500, // freq-deviation std confirming FM
+    aud_gate_db: f64 = 5.0, // demod-output low/high band power ratio: above ⇒ real audio ⇒ FM
+    carr_null_db: f64 = -3.0, // center ≥3 dB below the slot shoulders ⇒ suppressed carrier ⇒ DSB
+    cv_hi: f64 = 0.35, // envelope coefficient-of-variation confirming DSB
     sym_hi: f64 = 0.6, // sideband symmetry confirming DSB
     am_snr_db: f64 = 8.0, // AM/DSB is easily faked by noise — demand real SNR
-    min_bw_hz: f64 = 2000, // a real modulated slot, not a bare carrier/data spike
+    am_min_bw_hz: f64 = 4000, // DSB of audio is inherently broadband; a narrow symmetric slot is low-dev FM or a data carrier, not DSB
+    wide_junk_hz: f64 = 12_000, // a non-standard region wider than this that classifies as nothing is overload/MPX splatter
 };
 
 const Region = struct { center_hz: f64, bw_hz: f64, peak_bin: usize };
@@ -149,8 +161,10 @@ pub fn scan(base: std.mem.Allocator, mpx: []const f32, cfg: ScanConfig) !ScanRes
     for (regions[0..nreg]) |r| {
         const floor = localFloorDb(psd_db, &welch, fs, r.center_hz);
         const snr = psd_db[r.peak_bin] - floor;
-        const mod = classify(wa, mpx, psd, &welch, r.center_hz, r.bw_hz, snr, cfg, mixed, zbuf, fbuf);
-        reports[nrep] = .{ .center_hz = r.center_hz, .mod = mod, .bw_hz = r.bw_hz, .snr_db = snr, .guess = guessFor(r.center_hz, mod) };
+        var metrics: SlotMetrics = .{};
+        const mod = stdSlotMod(r.center_hz, classify(wa, mpx, psd, &welch, r.center_hz, r.bw_hz, snr, cfg, mixed, zbuf, fbuf, &metrics));
+        if (!keepSlot(r.center_hz, snr, r.bw_hz, mod, cfg)) continue;
+        reports[nrep] = .{ .center_hz = r.center_hz, .mod = mod, .bw_hz = r.bw_hz, .snr_db = snr, .guess = guessFor(r.center_hz, mod), .metrics = metrics };
         nrep += 1;
     }
 
@@ -243,6 +257,7 @@ fn classify(
     mixed: []C32,
     zbuf: []C32,
     fbuf: []f32,
+    metrics: *SlotMetrics,
 ) Modulation {
     if (snr_db < cfg.snr_gate_db) return .unknown;
 
@@ -258,11 +273,11 @@ fn classify(
     var f2 = fir.build(C32, wa, fs, cutoff, decim) catch return .unknown;
     const nz = f2.process(mixed[0..mpx.len], zbuf);
 
-    if (nz < 1100) return .unknown; // too little data
+    if (nz < 1100) return .unknown; // below this the envelope-CV and audio-likeness stats are too noisy to trust
     const warm = @min(nz / 8, 512);
     const z = zbuf[warm..nz];
 
-    // envelope coefficient of variation
+    // envelope coefficient of variation — large amplitude swing is DSB evidence.
     var sum: f64 = 0;
     for (z) |c| sum += c.mag();
     const mean_env = sum / @as(f64, @floatFromInt(z.len));
@@ -273,43 +288,84 @@ fn classify(
         var_env += d * d;
     }
     const cv_env = @sqrt(var_env / @as(f64, @floatFromInt(z.len))) / mean_env;
+    metrics.cv_env = cv_env;
 
-    // instantaneous-frequency deviation, gated to high-envelope samples so DSB
-    // zero-crossing phase flips don't masquerade as FM deviation.
+    // FM-demodulate the slot; the output is the candidate audio program.
     var demod = FmDemod{};
     _ = demod.process(z, fbuf[0..z.len]);
-    const gate = 0.2 * mean_env;
-    var fsum: f64 = 0;
-    var fcount: usize = 0;
-    for (z, 0..) |c, j| {
-        if (c.mag() >= gate) {
-            fsum += fbuf[j];
-            fcount += 1;
-        }
-    }
-    if (fcount < 100) return .unknown;
-    const fmean = fsum / @as(f64, @floatFromInt(fcount));
-    var fvar: f64 = 0;
-    for (z, 0..) |c, j| {
-        if (c.mag() >= gate) {
-            const d = fbuf[j] - fmean;
-            fvar += d * d;
-        }
-    }
-    const dev_rad = @sqrt(fvar / @as(f64, @floatFromInt(fcount)));
-    const dev_hz = dev_rad * fs_chan / (2.0 * std.math.pi);
+
+    // B1 — audio-likeness: a real FM subcarrier carries audio, whose demod output
+    // concentrates in the low band; FM-demodulated noise (or a DSB's phase flips)
+    // has the rising "triangular" PSD (∝ f²), i.e. high-band-heavy. This is the FM
+    // discriminant — it is deviation-independent, so low-deviation SCAs still pass.
+    const audio_db = audioLikenessDb(wa, fbuf[0..z.len], fs_chan) catch return .unknown;
+    metrics.audio_db = audio_db;
+
+    // C — carrier presence: a suppressed-carrier DSB has a spectral null at center
+    // while FM/carrier-AM have a center spike. center-bin power vs the slot shoulders.
+    const carrier_db = carrierDb(psd, welch, fs, center_hz, bw_hz);
+    metrics.carrier_db = carrier_db;
 
     const sym = sidebandSymmetry(psd, welch, fs, center_hz, bw_hz);
+    metrics.sym = sym;
 
-    // Only commit to a modulation for a slot with real modulated bandwidth — a
-    // bare carrier or data spike, or a noise-swamped slot, stays `unknown`.
-    // cv_env is the primary discriminant (constant envelope ⇒ FM, high amplitude
-    // variation ⇒ AM/DSB); dev confirms FM, symmetry + SNR confirm DSB (which noise
-    // otherwise mimics).
-    const wide = bw_hz >= cfg.min_bw_hz;
-    if (wide and cv_env < cfg.cv_lo and dev_hz > cfg.dev_hi_hz) return .fm;
-    if (wide and snr_db >= cfg.am_snr_db and cv_env > cfg.cv_hi and sym > cfg.sym_hi) return .am_dsb;
+    // D — FM is the default for an audio subcarrier (US SCAs are FM ~always). Commit
+    // to am_dsb only on positive DSB evidence: a broadband, symmetric slot with a
+    // suppressed carrier and real envelope swing at real SNR (the 38 kHz stereo L−R).
+    // Otherwise an audio-like slot is FM; everything else (noise, data, bare carrier)
+    // is unknown.
+    const am_wide = bw_hz >= cfg.am_min_bw_hz;
+    if (am_wide and snr_db >= cfg.am_snr_db and carrier_db < cfg.carr_null_db and
+        sym > cfg.sym_hi and cv_env > cfg.cv_hi) return .am_dsb;
+    if (audio_db > cfg.aud_gate_db) return .fm;
     return .unknown;
+}
+
+/// B1 — ratio (dB) of mean low-band (0.3–3 kHz) to mean high-band (5–20 kHz) power
+/// density in an FM-demod output. Audio concentrates low; demod noise rises with f,
+/// so noise/DSB read low and a real audio program reads high.
+fn audioLikenessDb(wa: std.mem.Allocator, x: []const f32, fs_chan: f64) !f64 {
+    var dw = try Welch.init(wa, 1024);
+    dw.run(x);
+    var lo: f64 = 0;
+    var lo_n: usize = 0;
+    var k = dw.hzBin(300, fs_chan);
+    const lo_hi = dw.hzBin(3000, fs_chan);
+    while (k <= lo_hi and k < dw.psd.len) : (k += 1) {
+        lo += dw.psd[k];
+        lo_n += 1;
+    }
+    var hi: f64 = 0;
+    var hi_n: usize = 0;
+    var j = dw.hzBin(5000, fs_chan);
+    const hi_hi = @min(dw.hzBin(20000, fs_chan), dw.psd.len - 1);
+    while (j <= hi_hi) : (j += 1) {
+        hi += dw.psd[j];
+        hi_n += 1;
+    }
+    const lo_mean = lo / @as(f64, @floatFromInt(@max(1, lo_n)));
+    const hi_mean = hi / @as(f64, @floatFromInt(@max(1, hi_n)));
+    return 10.0 * std.math.log10((lo_mean + 1e-30) / (hi_mean + 1e-30));
+}
+
+/// C — center-bin power vs the slot shoulders (±0.3·bw), in dB. A suppressed-carrier
+/// DSB reads strongly negative (null at center); FM/carrier-AM read ≥0 (carrier spike).
+fn carrierDb(psd: []const f64, welch: *const Welch, fs: f64, center_hz: f64, bw_hz: f64) f64 {
+    const cbin = welch.hzBin(center_hz, fs);
+    const shoff = welch.hzBin(bw_hz * 0.3, fs);
+    if (shoff == 0 or cbin >= psd.len) return 0;
+    var sh: f64 = 0;
+    var n: usize = 0;
+    if (cbin >= shoff) {
+        sh += psd[cbin - shoff];
+        n += 1;
+    }
+    if (cbin + shoff < psd.len) {
+        sh += psd[cbin + shoff];
+        n += 1;
+    }
+    if (n == 0) return 0;
+    return 10.0 * std.math.log10((psd[cbin] + 1e-30) / (sh / @as(f64, @floatFromInt(n)) + 1e-30));
 }
 
 fn sidebandSymmetry(psd: []const f64, welch: *const Welch, fs: f64, center_hz: f64, bw_hz: f64) f64 {
@@ -331,14 +387,42 @@ fn near(a: f64, b: f64, tol: f64) bool {
     return @abs(a - b) <= tol;
 }
 
+fn isNamedSlot(center_hz: f64) bool {
+    return near(center_hz, 38_000, 2000) or near(center_hz, 57_000, 1500) or
+        near(center_hz, 67_000, 1500) or near(center_hz, 92_000, 1500);
+}
+
+/// Drop broadband junk the region detector latches onto (overload spurs / MPX splatter).
+/// Standardized slots always pass; otherwise (A) skip noise-level regions and (D) skip
+/// wide regions that classified as nothing — real wide signals classify (stereo ⇒ DSB).
+fn keepSlot(center_hz: f64, snr_db: f64, bw_hz: f64, mod: Modulation, cfg: ScanConfig) bool {
+    if (isNamedSlot(center_hz)) return true;
+    if (snr_db < cfg.snr_gate_db) return false;
+    if (mod == .unknown and bw_hz > cfg.wide_junk_hz) return false;
+    return true;
+}
+
+/// Standardized MPX slots have a modulation fixed by the FM standard, so assert it rather
+/// than trust the per-slot metric — a strong RDS data clock (~1.2 kHz biphase) lands in
+/// the audio band and otherwise fools the audio-likeness test into reading `fm`.
+fn stdSlotMod(center_hz: f64, classified: Modulation) Modulation {
+    if (near(center_hz, 38_000, 2000)) return .am_dsb; // stereo L−R is DSB-SC
+    if (near(center_hz, 57_000, 1500)) return .data; // RDS/RBDS is digital data, not audio
+    return classified;
+}
+
+/// Best-effort slot identification — standardized MPX assignments (pilot-locked 38 kHz
+/// stereo, 57 kHz RDS) and the modulation we measured. Deliberately does NOT guess at
+/// content (e.g. whether an audio SCA is a reading service vs music) — we don't decode it.
 fn guessFor(center_hz: f64, mod: Modulation) []const u8 {
     if (near(center_hz, 38_000, 2000)) return "stereo subcarrier (L−R)";
-    if (near(center_hz, 57_000, 1500)) return "data (RDS)";
+    if (near(center_hz, 57_000, 1500)) return "data subcarrier (RDS)";
     const sca = near(center_hz, 67_000, 1500) or near(center_hz, 92_000, 1500);
     return switch (mod) {
-        .fm => if (sca) "audio SCA (reading service)" else "FM subcarrier",
-        .am_dsb => "AM/DSB — possible bleedthrough",
-        .unknown => "weak — unidentified",
+        .fm => if (sca) "audio SCA" else "FM subcarrier",
+        .am_dsb => "DSB subcarrier",
+        .data => "data subcarrier",
+        .unknown => "unidentified",
     };
 }
 
@@ -356,15 +440,16 @@ test "scan detects pilot + classifies an FM SCA and a DSB slot" {
     const pi = std.math.pi;
     var fm_ph: f64 = 0; // FM subcarrier phase accumulator
     var m_fm: f64 = 0; // bandlimited message (1-pole lowpass of white noise)
-    var m_dsb: f64 = 0;
     for (buf, 0..) |*s, n| {
         const t = @as(f64, @floatFromInt(n)) / fs;
         m_fm = 0.92 * m_fm + 0.08 * rnd.floatNorm(f64); // ~3 kHz-wide message
-        m_dsb = 0.96 * m_dsb + 0.04 * rnd.floatNorm(f64); // narrower ⇒ concentrated DSB
         const pilot = 0.30 * @cos(2.0 * pi * 19_000.0 * t);
         fm_ph += 2.0 * pi * (67_000.0 + 14_000.0 * m_fm) / fs; // FM, ~3 kHz deviation
         const fm67 = 0.25 * @cos(fm_ph);
-        const dsb92 = 4.0 * m_dsb * @cos(2.0 * pi * 92_000.0 * t); // DSB-SC, broadband
+        // DSB-SC: a compact 3-tone message (0.8/1.6/2.4 kHz) ⇒ sidebands at 92k±{.8,1.6,2.4}k,
+        // a clean ~4.8 kHz occupied band (>am_min_bw) with no long spectral tails to bias the floor.
+        const m_dsb = @cos(2.0 * pi * 800.0 * t) + @cos(2.0 * pi * 1600.0 * t) + @cos(2.0 * pi * 2400.0 * t);
+        const dsb92 = 1.2 * m_dsb * @cos(2.0 * pi * 92_000.0 * t);
         s.* = @floatCast(pilot + fm67 + dsb92 + 0.012 * rnd.floatNorm(f64));
     }
 
@@ -380,6 +465,64 @@ test "scan detects pilot + classifies an FM SCA and a DSB slot" {
     }
     try testing.expect(found_fm67);
     try testing.expect(found_dsb92);
+}
+
+test "narrowband low-deviation FM classifies as fm (carrier present + audio-like)" {
+    // A weak (~+10 dB) low-deviation FM slot ~2.5 kHz wide carrying audio (low-pass
+    // noise). Noise inflates cv_env here, so envelope swing alone would mis-call it
+    // am_dsb; classification must lean on a present carrier (not a null) and an
+    // audio-like demod output ⇒ fm.
+    const fs = 256_000.0;
+    const N = 1_000_000;
+    const buf = try testing.allocator.alloc(f32, N);
+    defer testing.allocator.free(buf);
+    var prng = std.Random.DefaultPrng.init(11);
+    const rnd = prng.random();
+    const pi = std.math.pi;
+    var fm_ph: f64 = 0;
+    var msg: f64 = 0;
+    for (buf, 0..) |*s, n| {
+        const t = @as(f64, @floatFromInt(n)) / fs;
+        msg = 0.975 * msg + 0.222 * rnd.floatNorm(f64); // ~1 kHz message
+        const pilot = 0.30 * @cos(2.0 * pi * 19_000.0 * t);
+        fm_ph += 2.0 * pi * (67_000.0 + 1100.0 * msg) / fs; // low deviation ⇒ ~2.5 kHz occupied
+        const fm67 = 0.10 * @cos(fm_ph);
+        s.* = @floatCast(pilot + fm67 + 0.18 * rnd.floatNorm(f64));
+    }
+
+    var res = try scan(testing.allocator, buf, .{});
+    defer res.deinit();
+    var found = false;
+    for (res.slots) |sl| {
+        if (near(sl.center_hz, 67_000, 1500)) {
+            try testing.expect(sl.mod == .fm);
+            found = true;
+        }
+    }
+    try testing.expect(found);
+}
+
+test "standardized slots assert their modulation regardless of the metric" {
+    // 57 kHz RDS must never read fm (a strong data clock fools the audio test); 38 kHz
+    // stereo L−R is DSB-SC; audio-band slots keep whatever classify decided.
+    try testing.expectEqual(Modulation.data, stdSlotMod(57_000, .fm));
+    try testing.expectEqual(Modulation.data, stdSlotMod(57_200, .unknown));
+    try testing.expectEqual(Modulation.am_dsb, stdSlotMod(38_000, .unknown));
+    try testing.expectEqual(Modulation.fm, stdSlotMod(67_000, .fm));
+    try testing.expectEqual(Modulation.unknown, stdSlotMod(67_000, .unknown));
+}
+
+test "junk filter drops broadband spurs, keeps real and standardized slots" {
+    const cfg = ScanConfig{};
+    // standardized slots always pass — even the wide 38 kHz stereo and weak named slots
+    try testing.expect(keepSlot(38_000, 1, 30_000, .am_dsb, cfg));
+    try testing.expect(keepSlot(67_000, 2, 6_000, .fm, cfg));
+    // A: non-standard noise-level region (the 101 kHz +1 dB spur)
+    try testing.expect(!keepSlot(101_000, 1, 17_400, .unknown, cfg));
+    // D: non-standard wide unknown even at decent SNR (the 32 kHz +9 dB / 14.5 kHz spur)
+    try testing.expect(!keepSlot(32_000, 9, 14_500, .unknown, cfg));
+    // a real non-standard narrow signal that classified is kept
+    try testing.expect(keepSlot(80_000, 10, 6_000, .fm, cfg));
 }
 
 test "scan finds no slots in plain mono+pilot (no false positives)" {
