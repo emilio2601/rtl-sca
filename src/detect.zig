@@ -1,19 +1,13 @@
 const std = @import("std");
-const C32 = @import("complex.zig").C32;
 const Welch = @import("fft.zig").Welch;
-const Nco = @import("nco.zig").Nco;
-const fir = @import("firdecim.zig");
-const FmDemod = @import("fmdemod.zig").FmDemod;
 
 pub const Modulation = enum { fm, am_dsb, data, unknown };
 
 /// The metrics behind a classification, surfaced for `scan -v`. NaN ⇒ not computed
-/// (the slot returned before extraction, e.g. below the SNR gate).
+/// (the slot returned before classification, e.g. below the SNR gate).
 pub const SlotMetrics = struct {
-    cv_env: f64 = nan,
-    audio_db: f64 = nan,
-    carrier_db: f64 = nan,
-    sym: f64 = nan,
+    carrier_db: f64 = nan, // center vs shoulders: >carr_present ⇒ FM, <carr_null ⇒ suppressed (DSB)
+    sym: f64 = nan, // sideband symmetry
     const nan = std.math.nan(f64);
 };
 
@@ -54,9 +48,8 @@ pub const ScanConfig = struct {
     slot_gate_db: f64 = 6.0, // region threshold above the global floor
     named_gate_db: f64 = 2.0, // lower gate when probing the canonical 57/67/92 slots
     pilot_gate_db: f64 = 10.0,
-    aud_gate_db: f64 = 5.0, // demod-output low/high band power ratio: above ⇒ real audio ⇒ FM
+    carr_present_db: f64 = 0.5, // center ≥0.5 dB above the slot shoulders ⇒ a real carrier ⇒ FM (moderate-deviation FM spreads energy into its sidebands, so the carrier sits only ~1 dB up)
     carr_null_db: f64 = -3.0, // center ≥3 dB below the slot shoulders ⇒ suppressed carrier ⇒ DSB
-    cv_hi: f64 = 0.35, // envelope coefficient-of-variation confirming DSB
     sym_hi: f64 = 0.6, // sideband symmetry confirming DSB
     am_snr_db: f64 = 8.0, // AM/DSB is easily faked by noise — demand real SNR
     am_min_bw_hz: f64 = 4000, // DSB of audio is inherently broadband; a narrow symmetric slot is low-dev FM or a data carrier, not DSB
@@ -152,17 +145,13 @@ pub fn scan(base: std.mem.Allocator, mpx: []const f32, cfg: ScanConfig) !ScanRes
     errdefer result.deinit();
     const ra = result.allocator();
 
-    const mixed = try wa.alloc(C32, mpx.len);
-    const zbuf = try wa.alloc(C32, mpx.len);
-    const fbuf = try wa.alloc(f32, mpx.len);
-
     var reports: [max_slots]SlotReport = undefined;
     var nrep: usize = 0;
     for (regions[0..nreg]) |r| {
         const floor = localFloorDb(psd_db, &welch, fs, r.center_hz);
         const snr = psd_db[r.peak_bin] - floor;
         var metrics: SlotMetrics = .{};
-        const mod = stdSlotMod(r.center_hz, classify(wa, mpx, psd, &welch, r.center_hz, r.bw_hz, snr, cfg, mixed, zbuf, fbuf, &metrics));
+        const mod = stdSlotMod(r.center_hz, classify(psd, &welch, fs, r.center_hz, r.bw_hz, snr, cfg, &metrics));
         if (!keepSlot(r.center_hz, snr, r.bw_hz, mod, cfg)) continue;
         reports[nrep] = .{ .center_hz = r.center_hz, .mod = mod, .bw_hz = r.bw_hz, .snr_db = snr, .guess = guessFor(r.center_hz, mod), .metrics = metrics };
         nrep += 1;
@@ -245,115 +234,42 @@ fn bandwidthHz(psd_db: []const f64, k: usize, floor_db: f64, welch: *const Welch
     return @as(f64, @floatFromInt(hi - lo)) * fs / @as(f64, @floatFromInt(welch.fft.n));
 }
 
+/// Classify a detected slot from the MPX PSD alone — no per-slot demodulation. FM is a
+/// present (non-suppressed) carrier; DSB is a broadband, symmetric, suppressed-carrier
+/// null at real SNR (the 38 kHz stereo L−R). Carrier presence is content-independent: a
+/// carrier reads the same whether its program is loud or silent.
 fn classify(
-    wa: std.mem.Allocator,
-    mpx: []const f32,
     psd: []const f64,
     welch: *const Welch,
+    fs: f64,
     center_hz: f64,
     bw_hz: f64,
     snr_db: f64,
     cfg: ScanConfig,
-    mixed: []C32,
-    zbuf: []C32,
-    fbuf: []f32,
     metrics: *SlotMetrics,
 ) Modulation {
     if (snr_db < cfg.snr_gate_db) return .unknown;
 
-    const fs = cfg.fs_mpx;
-    // Extraction channel wide enough to capture the whole slot (SCA is up to ~8 kHz
-    // wide; a too-narrow filter turns FM into spurious envelope variation).
-    const cutoff = std.math.clamp(bw_hz * 0.7, 4000.0, 12000.0);
-    const decim: usize = @max(1, @as(usize, @intFromFloat(fs / (4.0 * cutoff))));
-    const fs_chan = fs / @as(f64, @floatFromInt(decim));
-
-    var nco = Nco.init(center_hz, fs);
-    _ = nco.mixReal(mpx, mixed);
-    var f2 = fir.build(C32, wa, fs, cutoff, decim) catch return .unknown;
-    const nz = f2.process(mixed[0..mpx.len], zbuf);
-
-    if (nz < 1100) return .unknown; // below this the envelope-CV and audio-likeness stats are too noisy to trust
-    const warm = @min(nz / 8, 512);
-    const z = zbuf[warm..nz];
-
-    // envelope coefficient of variation — large amplitude swing is DSB evidence.
-    var sum: f64 = 0;
-    for (z) |c| sum += c.mag();
-    const mean_env = sum / @as(f64, @floatFromInt(z.len));
-    if (mean_env <= 0) return .unknown;
-    var var_env: f64 = 0;
-    for (z) |c| {
-        const d = c.mag() - mean_env;
-        var_env += d * d;
-    }
-    const cv_env = @sqrt(var_env / @as(f64, @floatFromInt(z.len))) / mean_env;
-    metrics.cv_env = cv_env;
-
-    // FM-demodulate the slot; the output is the candidate audio program.
-    var demod = FmDemod{};
-    _ = demod.process(z, fbuf[0..z.len]);
-
-    // B1 — audio-likeness: a real FM subcarrier carries audio, whose demod output
-    // concentrates in the low band; FM-demodulated noise (or a DSB's phase flips)
-    // has the rising "triangular" PSD (∝ f²), i.e. high-band-heavy. This is the FM
-    // discriminant — it is deviation-independent, so low-deviation SCAs still pass.
-    const audio_db = audioLikenessDb(wa, fbuf[0..z.len], fs_chan) catch return .unknown;
-    metrics.audio_db = audio_db;
-
-    // C — carrier presence: a suppressed-carrier DSB has a spectral null at center
-    // while FM/carrier-AM have a center spike. center-bin power vs the slot shoulders.
     const carrier_db = carrierDb(psd, welch, fs, center_hz, bw_hz);
     metrics.carrier_db = carrier_db;
-
     const sym = sidebandSymmetry(psd, welch, fs, center_hz, bw_hz);
     metrics.sym = sym;
 
-    // D — FM is the default for an audio subcarrier (US SCAs are FM ~always). Commit
-    // to am_dsb only on positive DSB evidence: a broadband, symmetric slot with a
-    // suppressed carrier and real envelope swing at real SNR (the 38 kHz stereo L−R).
-    // Otherwise an audio-like slot is FM; everything else (noise, data, bare carrier)
-    // is unknown.
     const am_wide = bw_hz >= cfg.am_min_bw_hz;
-    if (am_wide and snr_db >= cfg.am_snr_db and carrier_db < cfg.carr_null_db and
-        sym > cfg.sym_hi and cv_env > cfg.cv_hi) return .am_dsb;
-    if (audio_db > cfg.aud_gate_db) return .fm;
+    if (am_wide and snr_db >= cfg.am_snr_db and carrier_db < cfg.carr_null_db and sym > cfg.sym_hi)
+        return .am_dsb;
+    // NaN carrier (shoulders off-band) fails this comparison ⇒ unknown, as intended.
+    if (carrier_db > cfg.carr_present_db) return .fm;
     return .unknown;
 }
 
-/// B1 — ratio (dB) of mean low-band (0.3–3 kHz) to mean high-band (5–20 kHz) power
-/// density in an FM-demod output. Audio concentrates low; demod noise rises with f,
-/// so noise/DSB read low and a real audio program reads high.
-fn audioLikenessDb(wa: std.mem.Allocator, x: []const f32, fs_chan: f64) !f64 {
-    var dw = try Welch.init(wa, 1024);
-    dw.run(x);
-    var lo: f64 = 0;
-    var lo_n: usize = 0;
-    var k = dw.hzBin(300, fs_chan);
-    const lo_hi = dw.hzBin(3000, fs_chan);
-    while (k <= lo_hi and k < dw.psd.len) : (k += 1) {
-        lo += dw.psd[k];
-        lo_n += 1;
-    }
-    var hi: f64 = 0;
-    var hi_n: usize = 0;
-    var j = dw.hzBin(5000, fs_chan);
-    const hi_hi = @min(dw.hzBin(20000, fs_chan), dw.psd.len - 1);
-    while (j <= hi_hi) : (j += 1) {
-        hi += dw.psd[j];
-        hi_n += 1;
-    }
-    const lo_mean = lo / @as(f64, @floatFromInt(@max(1, lo_n)));
-    const hi_mean = hi / @as(f64, @floatFromInt(@max(1, hi_n)));
-    return 10.0 * std.math.log10((lo_mean + 1e-30) / (hi_mean + 1e-30));
-}
-
-/// C — center-bin power vs the slot shoulders (±0.3·bw), in dB. A suppressed-carrier
-/// DSB reads strongly negative (null at center); FM/carrier-AM read ≥0 (carrier spike).
+/// C — center-bin power vs the slot shoulders (±0.3·bw), in dB. A carrier reads positive
+/// (center spike); a suppressed-carrier DSB reads strongly negative (null at center).
+/// Returns NaN when the shoulders fall off the analyzed band (no usable measurement).
 fn carrierDb(psd: []const f64, welch: *const Welch, fs: f64, center_hz: f64, bw_hz: f64) f64 {
     const cbin = welch.hzBin(center_hz, fs);
     const shoff = welch.hzBin(bw_hz * 0.3, fs);
-    if (shoff == 0 or cbin >= psd.len) return 0;
+    if (shoff == 0 or cbin >= psd.len) return std.math.nan(f64);
     var sh: f64 = 0;
     var n: usize = 0;
     if (cbin >= shoff) {
@@ -364,7 +280,7 @@ fn carrierDb(psd: []const f64, welch: *const Welch, fs: f64, center_hz: f64, bw_
         sh += psd[cbin + shoff];
         n += 1;
     }
-    if (n == 0) return 0;
+    if (n == 0) return std.math.nan(f64);
     return 10.0 * std.math.log10((psd[cbin] + 1e-30) / (sh / @as(f64, @floatFromInt(n)) + 1e-30));
 }
 
@@ -467,11 +383,10 @@ test "scan detects pilot + classifies an FM SCA and a DSB slot" {
     try testing.expect(found_dsb92);
 }
 
-test "narrowband low-deviation FM classifies as fm (carrier present + audio-like)" {
-    // A weak (~+10 dB) low-deviation FM slot ~2.5 kHz wide carrying audio (low-pass
-    // noise). Noise inflates cv_env here, so envelope swing alone would mis-call it
-    // am_dsb; classification must lean on a present carrier (not a null) and an
-    // audio-like demod output ⇒ fm.
+test "narrowband low-deviation FM classifies as fm (carrier present)" {
+    // A weak (~+10 dB) low-deviation FM slot ~2.5 kHz wide. A strong carrier sits well
+    // above its shoulders, so carrier-presence classifies it fm regardless of how much
+    // audio it happens to be carrying at the moment.
     const fs = 256_000.0;
     const N = 1_000_000;
     const buf = try testing.allocator.alloc(f32, N);

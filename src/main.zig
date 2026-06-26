@@ -201,17 +201,21 @@ fn printScan(w: *Io.Writer, res: detect.ScanResult, verbose: u8) !void {
     }
 }
 
-/// `-v`: the metrics behind each verdict — FM keys on `audio` clearing its gate, DSB on
-/// `carrier` going negative (suppressed) with `sym`/`cv`. NaN ⇒ slot fell out before
-/// extraction (below the SNR gate).
+/// `-v`: the metrics behind each verdict — FM keys on `carrier` clearing carr_present,
+/// DSB on it going below carr_null (suppressed) with high `sym`. NaN sym ⇒ slot fell out
+/// below the SNR gate; NaN carrier ⇒ shoulders off the analyzed band.
 fn printSlotMetrics(w: *Io.Writer, m: detect.SlotMetrics) !void {
     const g = detect.ScanConfig{};
-    if (std.math.isNan(m.cv_env)) {
-        try w.writeAll("          \u{2514} (not classified — below SNR gate / too little data)\n");
+    if (std.math.isNan(m.sym)) {
+        try w.writeAll("          \u{2514} (not classified — below SNR gate)\n");
         return;
     }
-    try w.print("          \u{2514} audio {d:.2} (gate {d:.1})  carrier {d:.1} dB (DSB < {d:.1})  cv {d:.2}  sym {d:.2}\n", .{
-        m.audio_db, g.aud_gate_db, m.carrier_db, g.carr_null_db, m.cv_env, m.sym,
+    if (std.math.isNan(m.carrier_db)) {
+        try w.print("          \u{2514} carrier n/a (shoulders off-band)  sym {d:.2}\n", .{m.sym});
+        return;
+    }
+    try w.print("          \u{2514} carrier {d:.1} dB (FM > {d:.1}, DSB < {d:.1})  sym {d:.2}\n", .{
+        m.carrier_db, g.carr_present_db, g.carr_null_db, m.sym,
     });
 }
 
