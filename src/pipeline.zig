@@ -2,10 +2,11 @@ const std = @import("std");
 const cli = @import("cli.zig");
 const complex = @import("complex.zig");
 const C32 = complex.C32;
-const FmDemod = @import("fmdemod.zig").FmDemod;
 const fir = @import("firdecim.zig");
 const Deemph = @import("deemph.zig").Deemph;
 const Subcarrier = @import("subcarrier.zig").Subcarrier;
+const frontend_mod = @import("frontend.zig");
+const Frontend = frontend_mod.Frontend;
 const source_mod = @import("source.zig");
 const Source = source_mod.Source;
 const Format = source_mod.Format;
@@ -14,22 +15,16 @@ const Sink = sink_mod.Sink;
 const Running = @import("ring.zig").Running;
 
 const READ_BYTES: usize = 1 << 18; // 256 KiB raw IQ per read
-const MPX_MIN: f64 = 240_000; // §7: keep the MPX above this before extraction
 const AUDIO_RATE: u32 = 16_000; // §12
 
-pub const InitError = error{
-    RateNotDivisible,
-    NyquistTrap,
-    SubcarrierAboveNyquist,
-} || fir.BuildError;
+pub const InitError = error{SubcarrierAboveNyquist} || frontend_mod.Error;
 
 /// The full offline `rec` chain. Owns an arena holding every DSP buffer, sized
 /// once at init; the per-sample path never allocates.
 pub const Pipeline = struct {
     arena: std.heap.ArenaAllocator,
 
-    demod1: FmDemod,
-    fir1: fir.FirDecim(f32),
+    frontend: Frontend,
     sub: Subcarrier,
     deemph: Deemph,
     audio_gain: f32,
@@ -39,33 +34,29 @@ pub const Pipeline = struct {
     reader_buf: []u8,
     block: []u8,
     iq: []C32,
-    mpx: []f32,
     mpx256: []f32,
     audio: []f32,
 
     pub fn init(self: *Pipeline, base: std.mem.Allocator, opts: cli.Options) InitError!void {
         self.arena = std.heap.ArenaAllocator.init(base);
+        errdefer self.arena.deinit(); // a later guard may reject after we allocate
         const a = self.arena.allocator();
+        const max_iq = READ_BYTES / 2;
 
-        // ── rate plan (SPEC §4), derived from configured rates ──
-        const fs_iq: f64 = @floatFromInt(opts.rate_hz);
-        const d1: usize = @max(1, @as(usize, @intFromFloat(fs_iq / MPX_MIN)));
-        if (opts.rate_hz % d1 != 0) return error.RateNotDivisible;
-        const fs_mpx = fs_iq / @as(f64, @floatFromInt(d1));
-        if (fs_mpx < MPX_MIN) return error.NyquistTrap;
+        // Front-end derives d1/fs_mpx and owns IQ→MPX (SPEC §4 rate plan).
+        self.frontend = try Frontend.init(a, opts.rate_hz, max_iq);
+        const fs_mpx = self.frontend.fs_mpx;
+        const d1 = self.frontend.d1;
 
         const slot_edge: f64 = @floatFromInt(opts.sub_hz + opts.bw_hz / 2);
-        const cutoff1 = fs_mpx * 0.43; // ~110 kHz at 256 ksps
-        if (slot_edge >= cutoff1) return error.SubcarrierAboveNyquist;
+        if (slot_edge >= fs_mpx * 0.43) return error.SubcarrierAboveNyquist;
 
         const fs_mpx_u: u32 = @intFromFloat(fs_mpx);
         if (fs_mpx_u % AUDIO_RATE != 0) return error.RateNotDivisible;
         const d2: usize = fs_mpx_u / AUDIO_RATE;
 
         // ── stages ──
-        self.demod1 = .{};
-        self.fir1 = try fir.build(f32, a, fs_iq, cutoff1, d1);
-        const max_mpx256 = READ_BYTES / 2 / d1 + 2;
+        const max_mpx256 = max_iq / d1 + 2;
         self.sub = try Subcarrier.init(a, opts.sub_hz, opts.bw_hz, fs_mpx, d2, max_mpx256);
         self.deemph = Deemph.init(opts.deemph_us, AUDIO_RATE);
         // atan2 emits radians, not ±1; map the expected deviation toward full scale.
@@ -74,11 +65,9 @@ pub const Pipeline = struct {
         self.fs_audio = AUDIO_RATE;
 
         // ── buffers ──
-        const max_iq = READ_BYTES / 2;
         self.reader_buf = try a.alloc(u8, 1 << 16);
         self.block = try a.alloc(u8, READ_BYTES);
         self.iq = try a.alloc(C32, max_iq);
-        self.mpx = try a.alloc(f32, max_iq);
         self.mpx256 = try a.alloc(f32, max_mpx256);
         self.audio = try a.alloc(f32, max_iq / (d1 * d2) + 4);
     }
@@ -91,8 +80,7 @@ pub const Pipeline = struct {
     /// lands in self.audio[0..return]; gain is NOT applied (callers that play it
     /// out apply gain, tests read it raw).
     fn processIq(self: *Pipeline, iq: []const C32) usize {
-        const nmpx = self.demod1.process(iq, self.mpx);
-        const n256 = self.fir1.process(self.mpx[0..nmpx], self.mpx256);
+        const n256 = self.frontend.process(iq, self.mpx256);
         const na = self.sub.process(self.mpx256[0..n256], self.audio);
         self.deemph.process(self.audio[0..na]);
         return na;

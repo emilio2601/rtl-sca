@@ -14,9 +14,10 @@ See [`SPEC.md`](SPEC.md) for the full signal-chain design and background.
 ## Status
 
 Working through the build phases (see Roadmap). `rec` decodes a recorded IQ file to a
-WAV, and `play` plays a subcarrier live — from a file or from an `rtl_tcp` network
-server — out the speakers. `scan` is not implemented yet. Validated end to end on a
-real over-the-air signal (Q104.3, decoded and heard live from a remote Pi).
+WAV, `play` plays a subcarrier live — from a file or an `rtl_tcp` network server — out
+the speakers, and `scan` surveys a station's MPX (pilot, subcarrier slots, modulation,
+bandwidth, SNR). Validated end to end over the air: a blind band sweep + `scan` found a
+live 67 kHz SCA on 92.3 MHz, which `rec` then decoded to intelligible audio.
 
 ## Requirements
 
@@ -45,6 +46,7 @@ rtl-sca <command> <input> [flags]
 else is treated as a recorded IQ file path.
 
 ```sh
+rtl-sca scan capture.cu8                                      # survey the MPX: pilot, slots, mod, SNR
 rtl-sca play capture.cu8 --sub 0 --bw 15k --deemph 75us       # play a capture's mono program
 rtl-sca play capture.cu8 --sub 67k                            # play the 67 kHz SCA from a file
 rtl-sca play 89.9M --rtl-tcp 192.168.1.50:1234 --sub 0        # play live from an rtl_tcp server
@@ -86,8 +88,8 @@ standard (the default); `75us` (US) and `50us` (EU) are the main-channel values;
 |-------|-------|---|
 | 1 | Offline MVP: file source → FM demod → 67 kHz FM subcarrier → de-emphasis → WAV | ✅ |
 | 2 | Live: `rtl_tcp` network source + audio playback via miniaudio (USB source deferred) | ✅ |
+| 4 | `scan` survey mode: PSD, pilot/slot detection, AM-vs-FM classification, SNR | ✅ |
 | 3 | Configurable modulation; AM demod paths (`am-env`, `am-coherent`); `UsbSource` | |
-| 4 | `scan` survey mode: PSD, pilot/slot detection, AM-vs-FM classification, SNR | |
 | 5 | Stretch: RDS decode, headless Pi daemon, arbitrary-rate resampler | |
 
 ## Project layout

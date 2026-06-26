@@ -6,6 +6,9 @@ const ring_mod = @import("ring.zig");
 const Running = ring_mod.Running;
 const source_mod = @import("source.zig");
 const sink_mod = @import("sink.zig");
+const frontend_mod = @import("frontend.zig");
+const detect = @import("detect.zig");
+const complex = @import("complex.zig");
 
 const usage =
     \\rtl-sca — FM SCA subcarrier decoder
@@ -64,10 +67,7 @@ pub fn main(init: std.process.Init) !void {
     switch (opts.command) {
         .rec => try runRec(init, w, opts),
         .play => try runPlay(init, w, opts),
-        .scan => {
-            try printPlan(w, opts);
-            try w.writeAll("\n('scan' is not implemented yet — Phase 4)\n");
-        },
+        .scan => try runScan(init, w, opts),
     }
 }
 
@@ -103,27 +103,98 @@ fn runPlay(init: std.process.Init, w: *Io.Writer, opts: cli.Options) !void {
     driveSource(&p, init, opts, .{ .audio = &asink }, &running) catch |err| reportRun(w, err);
 }
 
-/// Build the right source (file or rtl_tcp) as a local and pump it into `sink`.
-fn driveSource(p: *pipeline.Pipeline, init: std.process.Init, opts: cli.Options, sink: sink_mod.Sink, running: *Running) !void {
-    const io = init.io;
+/// Open the source selected by `opts` into caller-owned storage (file or rtl_tcp),
+/// returning a Source that points at it. Caller closes via `source.close(io)`.
+fn openSource(
+    io: std.Io,
+    opts: cli.Options,
+    fsrc: *source_mod.FileSource,
+    rsrc: *source_mod.RtlTcpSource,
+    reader_buf: []u8,
+) !source_mod.Source {
     if (opts.rtl_tcp) |host_port| {
         const freq = switch (opts.input) {
             .freq => |f| f,
             .file => return error.RtlTcpNeedsFreq,
         };
-        var rs: source_mod.RtlTcpSource = undefined;
-        try rs.init(io, host_port, freq, opts.rate_hz, opts.gain, opts.ppm, p.reader_buf);
-        defer rs.close(io);
-        try p.run(io, .{ .rtltcp = &rs }, sink, running);
-    } else switch (opts.input) {
-        .file => |path| {
-            var fs: source_mod.FileSource = undefined;
-            try fs.init(io, path, p.reader_buf);
-            defer fs.close(io);
-            try p.run(io, .{ .file = &fs }, sink, running);
-        },
-        .freq => return error.LiveFreqNeedsRtlTcp,
+        try rsrc.init(io, host_port, freq, opts.rate_hz, opts.gain, opts.ppm, reader_buf);
+        return .{ .rtltcp = rsrc };
     }
+    return switch (opts.input) {
+        .file => |path| blk: {
+            try fsrc.init(io, path, reader_buf);
+            break :blk .{ .file = fsrc };
+        },
+        .freq => error.LiveFreqNeedsRtlTcp,
+    };
+}
+
+fn driveSource(p: *pipeline.Pipeline, init: std.process.Init, opts: cli.Options, sink: sink_mod.Sink, running: *Running) !void {
+    var fsrc: source_mod.FileSource = undefined;
+    var rsrc: source_mod.RtlTcpSource = undefined;
+    const source = try openSource(init.io, opts, &fsrc, &rsrc, p.reader_buf);
+    defer source.close(init.io);
+    try p.run(init.io, source, sink, running);
+}
+
+const scan_seconds = 4;
+const scan_read_bytes = 1 << 18;
+
+fn runScan(init: std.process.Init, w: *Io.Writer, opts: cli.Options) !void {
+    const io = init.io;
+    var arena = std.heap.ArenaAllocator.init(init.gpa);
+    defer arena.deinit();
+    const a = arena.allocator();
+
+    const max_iq = scan_read_bytes / 2;
+    var fe = frontend_mod.Frontend.init(a, opts.rate_hz, max_iq) catch |err| reportInit(w, err);
+
+    const cap: usize = scan_seconds * @as(usize, @intFromFloat(fe.fs_mpx));
+    const mpx = try a.alloc(f32, cap);
+    const block = try a.alloc(u8, scan_read_bytes);
+    const iq = try a.alloc(complex.C32, max_iq);
+    const reader_buf = try a.alloc(u8, 1 << 16);
+    const mpx_tmp = try a.alloc(f32, max_iq / fe.d1 + 2);
+
+    var fsrc: source_mod.FileSource = undefined;
+    var rsrc: source_mod.RtlTcpSource = undefined;
+    const source = openSource(io, opts, &fsrc, &rsrc, reader_buf) catch |err| reportRun(w, err);
+    defer source.close(io);
+
+    var running = Running.init(true);
+    installSigint(&running);
+
+    var filled: usize = 0;
+    while (running.load(.monotonic) and filled < cap) {
+        const nb = source.read(block) catch |err| reportRun(w, err);
+        if (nb == 0) break;
+        const niq = switch (source.format()) {
+            .cu8 => complex.unpackCu8(block[0..nb], iq),
+            .cs16 => complex.unpackCs16(block[0..nb], iq),
+        };
+        const n256 = fe.process(iq[0..niq], mpx_tmp);
+        const take = @min(n256, cap - filled);
+        @memcpy(mpx[filled .. filled + take], mpx_tmp[0..take]);
+        filled += take;
+    }
+
+    var res = detect.scan(init.gpa, mpx[0..filled], .{ .fs_mpx = fe.fs_mpx }) catch |err| reportRun(w, err);
+    defer res.deinit();
+    try printScan(w, res);
+}
+
+fn printScan(w: *Io.Writer, res: detect.ScanResult) !void {
+    if (res.stereo) {
+        try w.print("stereo : yes (pilot +{d:.0} dB)\n", .{res.pilot_snr_db});
+    } else {
+        try w.writeAll("stereo : no\n");
+    }
+    if (res.slots.len == 0) {
+        try w.writeAll("no subcarriers detected above the noise floor\n");
+        return;
+    }
+    try w.writeAll("\nslot      mod       bw         snr     guess\n");
+    for (res.slots) |s| try w.print("{f}\n", .{s});
 }
 
 var g_running: ?*Running = null;
@@ -217,4 +288,8 @@ test {
     _ = @import("subcarrier.zig");
     _ = @import("pipeline.zig");
     _ = @import("ring.zig");
+    _ = @import("fft.zig");
+    _ = @import("frontend.zig");
+    _ = @import("detect.zig");
+    _ = @import("complex.zig");
 }

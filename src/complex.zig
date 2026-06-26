@@ -12,6 +12,9 @@ pub const C32 = struct {
     pub inline fn add(a: C32, b: C32) C32 {
         return .{ .re = a.re + b.re, .im = a.im + b.im };
     }
+    pub inline fn sub(a: C32, b: C32) C32 {
+        return .{ .re = a.re - b.re, .im = a.im - b.im };
+    }
     pub inline fn mul(a: C32, b: C32) C32 {
         return .{ .re = a.re * b.re - a.im * b.im, .im = a.re * b.im + a.im * b.re };
     }
