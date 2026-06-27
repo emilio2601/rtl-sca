@@ -70,7 +70,7 @@ Live commands run until Ctrl-C (which finalizes the WAV). `--rtl-tcp` takes an
 The **main program audio is the slot at 0 Hz**: `--sub 0` (with ~15 kHz bandwidth and
 75 µs de-emphasis) recovers normal mono FM. It's supported as a validation/utility
 mode — if the station is audible, the front-end and FM demod are proven before
-chasing a weak subcarrier.
+chasing a weak subcarrier. It recovers mono only; stereo (L−R) decode is out of scope.
 
 Key flags (run `rtl-sca` with no command for the full list):
 
@@ -101,12 +101,6 @@ watch for drops or underruns during a long capture.
 
 ¹ A rational resampler bridges the internal content rate to any output rate. Live
 `play` defaults to the audio device's native rate; `rec`/files default to 48 kHz.
-
-## Not yet
-
-- RDS decode (57 kHz data subcarrier)
-- Headless Raspberry Pi daemon
-- Stereo (L−R) decode is out of scope — `--sub 0` recovers mono only.
 
 ## Project layout
 
