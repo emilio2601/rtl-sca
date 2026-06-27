@@ -70,11 +70,12 @@ pub const AudioSink = struct {
     handle: *audio.sca_audio,
     ring: *Ring,
     running: *const Running,
+    underruns: std.atomic.Value(u64), // audio callbacks that hit an empty ring
 
     pub fn init(self: *AudioSink, ring: *Ring, running: *const Running, sample_rate: u32) !void {
         const h = audio.sca_audio_create() orelse return error.AudioInit;
-        self.* = .{ .handle = h, .ring = ring, .running = running };
-        if (audio.sca_audio_start(h, sample_rate, pullCb, @ptrCast(ring)) != 0) {
+        self.* = .{ .handle = h, .ring = ring, .running = running, .underruns = .init(0) };
+        if (audio.sca_audio_start(h, sample_rate, pullCb, @ptrCast(self)) != 0) {
             audio.sca_audio_destroy(h);
             return error.AudioStart;
         }
@@ -102,10 +103,11 @@ pub const AudioSink = struct {
 };
 
 fn pullCb(ctx: ?*anyopaque, out: [*c]f32, frames: c_uint) callconv(.c) void {
-    const ring: *Ring = @ptrCast(@alignCast(ctx.?));
+    const self: *AudioSink = @ptrCast(@alignCast(ctx.?));
     const buf = out[0..frames];
-    const n = ring.pop(buf);
+    const n = self.ring.pop(buf);
     for (buf[n..]) |*s| s.* = 0; // underrun -> silence
+    if (n < frames) _ = self.underruns.fetchAdd(1, .monotonic);
 }
 
 /// Native sample rate of the default playback device, or 0 if none is available.
@@ -131,6 +133,20 @@ pub const Sink = union(enum) {
             .wav => |w| try w.finish(io),
             .audio => |a| try a.finish(io),
         }
+    }
+    /// Count of output-starvation events (audio only); a WAV sink can't underrun.
+    pub fn underruns(self: Sink) u64 {
+        return switch (self) {
+            .audio => |a| a.underruns.load(.monotonic),
+            .wav => 0,
+        };
+    }
+    /// Output-buffer occupancy (audio only), the live end-to-end latency cushion.
+    pub fn ringFill(self: Sink) ?struct { used: usize, capacity: usize } {
+        return switch (self) {
+            .audio => |a| .{ .used = a.ring.used(), .capacity = a.ring.buf.len },
+            .wav => null,
+        };
     }
 };
 

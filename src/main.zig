@@ -91,7 +91,7 @@ fn runRec(init: std.process.Init, w: *Io.Writer, opts: cli.Options) !void {
 
     var running = Running.init(true);
     installSigint(&running); // Ctrl-C finalizes a live recording cleanly
-    driveSource(&p, init, opts, .{ .wav = &wsink }, &running) catch |err| reportRun(w, err);
+    driveSource(&p, init, w, opts, .{ .wav = &wsink }, &running) catch |err| reportRun(w, err);
     try w.print("wrote {s}\n", .{out_path});
 }
 
@@ -119,7 +119,7 @@ fn runPlay(init: std.process.Init, w: *Io.Writer, opts: cli.Options) !void {
     asink.init(&ring, &running, p.fs_audio) catch |err| reportRun(w, err);
     installSigint(&running);
 
-    driveSource(&p, init, opts, .{ .audio = &asink }, &running) catch |err| reportRun(w, err);
+    driveSource(&p, init, w, opts, .{ .audio = &asink }, &running) catch |err| reportRun(w, err);
 }
 
 /// Open the source selected by `opts` into caller-owned storage (file or rtl_tcp),
@@ -154,13 +154,17 @@ fn openSource(
     };
 }
 
-fn driveSource(p: *pipeline.Pipeline, init: std.process.Init, opts: cli.Options, sink: sink_mod.Sink, running: *Running) !void {
+fn driveSource(p: *pipeline.Pipeline, init: std.process.Init, w: *Io.Writer, opts: cli.Options, sink: sink_mod.Sink, running: *Running) !void {
     var fsrc: source_mod.FileSource = undefined;
     var rsrc: source_mod.RtlTcpSource = undefined;
     var usrc: source_mod.UsbSource = undefined;
     const source = try openSource(init.io, init.gpa, opts, running, &fsrc, &rsrc, &usrc, p.reader_buf);
     defer source.close(init.io);
-    try p.run(init.io, source, sink, running);
+    const dbg: ?pipeline.Pipeline.Debug = if (opts.verbose > 0)
+        .{ .w = w, .periodic = opts.verbose >= 2 }
+    else
+        null;
+    try p.run(init.io, source, sink, running, dbg);
 }
 
 const scan_seconds = 4;
@@ -209,6 +213,17 @@ fn runScan(init: std.process.Init, w: *Io.Writer, opts: cli.Options) !void {
         @memcpy(mpx[filled .. filled + take], mpx_tmp[0..take]);
         filled += take;
     }
+
+    if (opts.verbose > 0) if (source.stats()) |s| {
+        const drop_pct = if (s.rx_bytes > 0)
+            100.0 * @as(f64, @floatFromInt(s.dropped_bytes)) / @as(f64, @floatFromInt(s.rx_bytes))
+        else
+            0.0;
+        try w.print("usb     : {d:.1} MB, drop {d} ({d:.2}%), ring peak {d}%\n", .{
+            @as(f64, @floatFromInt(s.rx_bytes)) / 1e6, s.dropped_bytes, drop_pct, 100 * s.ring_high_water / s.ring_capacity,
+        });
+        try w.flush();
+    };
 
     var res = detect.scan(init.gpa, mpx[0..filled], .{ .fs_mpx = fe.fs_mpx }) catch |err| reportRun(w, err);
     defer res.deinit();

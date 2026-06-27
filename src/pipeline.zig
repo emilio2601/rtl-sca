@@ -103,19 +103,65 @@ pub const Pipeline = struct {
         };
     }
 
+    /// Optional runtime diagnostics for `run` (driven by `-v`/`-vv`). Logged to
+    /// `w` (stderr); `periodic` adds an in-flight line roughly every 2 s of stream.
+    pub const Debug = struct {
+        w: *std.Io.Writer,
+        periodic: bool,
+    };
+
     /// Pump `source` through the DSP into `sink` until the source ends (file EOF)
     /// or `running` is cleared (SIGINT for live sources), then finalize the sink.
-    pub fn run(self: *Pipeline, io: std.Io, source: Source, sink: Sink, running: *Running) !void {
+    pub fn run(self: *Pipeline, io: std.Io, source: Source, sink: Sink, running: *Running, dbg: ?Debug) !void {
         const fmt = source.format();
+        var busy_ns: u64 = 0; // wall time spent in the DSP (vs. blocked on I/O)
+        var in_samples: u64 = 0;
+        const report_every: u64 = @intFromFloat(2.0 * self.plan.fs_iq);
+        var report_at = report_every;
+
         while (running.load(.monotonic)) {
             const nb = try source.read(self.block);
             if (nb == 0) break; // EOF (file source)
             const niq = self.unpack(fmt, self.block[0..nb]);
+            const t0 = std.Io.Clock.awake.now(io);
             const na = self.processIq(self.iq[0..niq]);
             for (self.audio[0..na]) |*s| s.* *= self.audio_gain;
+            busy_ns += @intCast(t0.durationTo(std.Io.Clock.awake.now(io)).nanoseconds);
             try sink.writeAudio(self.audio[0..na]);
+
+            in_samples += niq;
+            if (dbg) |d| if (d.periodic and in_samples >= report_at) {
+                try self.logStats(d.w, source, sink, in_samples, busy_ns);
+                report_at += report_every;
+            };
         }
         try sink.finish(io);
+        if (dbg) |d| try self.logStats(d.w, source, sink, in_samples, busy_ns);
+    }
+
+    /// One-line health snapshot: how much faster than real time the DSP ran, plus
+    /// the cross-thread loss counters (USB ring drops, audio underruns) that a
+    /// "looks fine but sounds choppy" bug otherwise hides.
+    fn logStats(self: *Pipeline, w: *std.Io.Writer, source: Source, sink: Sink, in_samples: u64, busy_ns: u64) !void {
+        const stream_s = @as(f64, @floatFromInt(in_samples)) / self.plan.fs_iq;
+        const busy_s = @as(f64, @floatFromInt(busy_ns)) / 1e9;
+        const rt = if (busy_s > 0) stream_s / busy_s else 0;
+        try w.print("stats   : stream {d:.1}s | dsp {d:.1}x realtime", .{ stream_s, rt });
+        if (source.stats()) |s| {
+            const drop_pct = if (s.rx_bytes > 0)
+                100.0 * @as(f64, @floatFromInt(s.dropped_bytes)) / @as(f64, @floatFromInt(s.rx_bytes))
+            else
+                0.0;
+            const hw_pct = 100 * s.ring_high_water / s.ring_capacity;
+            try w.print(" | usb {d:.1} MB, drop {d} ({d:.2}%), ring peak {d}%", .{
+                @as(f64, @floatFromInt(s.rx_bytes)) / 1e6, s.dropped_bytes, drop_pct, hw_pct,
+            });
+        }
+        if (sink.ringFill()) |rf| {
+            try w.print(" | aud ring {d}%, underruns {d}", .{ 100 * rf.used / rf.capacity, sink.underruns() });
+        }
+        try w.writeAll("\n");
+        try w.flush();
     }
 };
 
