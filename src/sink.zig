@@ -71,10 +71,19 @@ pub const AudioSink = struct {
     ring: *Ring,
     running: *const Running,
     underruns: std.atomic.Value(u64), // audio callbacks that hit an empty ring
+    primed: std.atomic.Value(bool), // false until the ring first fills to prime_frames
+    prime_frames: usize, // initial cushion before playback starts (avoids startup underruns)
 
     pub fn init(self: *AudioSink, ring: *Ring, running: *const Running, sample_rate: u32) !void {
         const h = audio.sca_audio_create() orelse return error.AudioInit;
-        self.* = .{ .handle = h, .ring = ring, .running = running, .underruns = .init(0) };
+        self.* = .{
+            .handle = h,
+            .ring = ring,
+            .running = running,
+            .underruns = .init(0),
+            .primed = .init(false),
+            .prime_frames = sample_rate / 20, // ~50 ms; the device warms up faster than the first IQ arrives
+        };
         if (audio.sca_audio_start(h, sample_rate, pullCb, @ptrCast(self)) != 0) {
             audio.sca_audio_destroy(h);
             return error.AudioStart;
@@ -90,6 +99,10 @@ pub const AudioSink = struct {
                 _ = usleep(2000); // ~2 ms; the audio period is ~27 ms
             }
         }
+        // Release the callback once a cushion exists, so playback starts on a full
+        // buffer instead of underrunning while the device pulls ahead of the DSP.
+        if (!self.primed.load(.monotonic) and self.ring.used() >= self.prime_frames)
+            self.primed.store(true, .release);
     }
 
     pub fn finish(self: *AudioSink, io: std.Io) !void {
@@ -105,6 +118,10 @@ pub const AudioSink = struct {
 fn pullCb(ctx: ?*anyopaque, out: [*c]f32, frames: c_uint) callconv(.c) void {
     const self: *AudioSink = @ptrCast(@alignCast(ctx.?));
     const buf = out[0..frames];
+    if (!self.primed.load(.acquire)) {
+        @memset(buf, 0); // priming: clean silence, not counted as an underrun
+        return;
+    }
     const n = self.ring.pop(buf);
     for (buf[n..]) |*s| s.* = 0; // underrun -> silence
     if (n < frames) _ = self.underruns.fetchAdd(1, .monotonic);

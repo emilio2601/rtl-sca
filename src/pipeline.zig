@@ -16,7 +16,11 @@ const sink_mod = @import("sink.zig");
 const Sink = sink_mod.Sink;
 const Running = @import("ring.zig").Running;
 
-const READ_BYTES: usize = 1 << 18; // 256 KiB raw IQ per read
+const READ_BYTES: usize = 1 << 18; // 256 KiB; sizes the one-shot DSP buffers
+// Live read granularity: the DSP emits audio one chunk at a time, so a smaller
+// chunk means smaller audio bursts and a lower output-latency floor. 64 KiB is
+// ~32 ms at 1.024 Msps. Bounded by READ_BYTES (the buffer capacity).
+const CHUNK_BYTES: usize = 1 << 16;
 
 pub const InitError = error{SubcarrierAboveNyquist} || frontend_mod.Error || rateplan.Error;
 
@@ -120,7 +124,7 @@ pub const Pipeline = struct {
         var report_at = report_every;
 
         while (running.load(.monotonic)) {
-            const nb = try source.read(self.block);
+            const nb = try source.read(self.block[0..CHUNK_BYTES]);
             if (nb == 0) break; // EOF (file source)
             const niq = self.unpack(fmt, self.block[0..nb]);
             const t0 = std.Io.Clock.awake.now(io);
