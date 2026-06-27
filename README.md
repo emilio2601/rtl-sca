@@ -73,6 +73,7 @@ Key flags (run `rtl-sca` with no command for the full list):
 | `--mod MODE` | `fm` \| `am-env` \| `am-coherent` | `fm` |
 | `--deemph TAU` | de-emphasis time constant (`120us`, `off`, …) | `150us` |
 | `--rate HZ` | RTL / recording sample rate | `1.024M` |
+| `--audio-rate HZ` | output audio rate (resampled to any rate) | `48k`¹ |
 | `--gain DB` | tuner gain (radio only) | auto |
 | `--device N` | USB dongle index (radio only) | `0` |
 | `--ppm N` | crystal correction in ppm (radio only) | `0` |
@@ -83,6 +84,9 @@ De-emphasis is a continuous time constant, not a fixed set. `150us` is the SCA
 standard (the default); `75us` (US) and `50us` (EU) are the main-channel values;
 `off` is no de-emphasis.
 
+¹ A rational resampler bridges the internal content rate to any output rate. Live
+`play` defaults to the audio device's native rate; `rec`/files default to 48 kHz.
+
 ## Roadmap
 
 | Phase | Scope | |
@@ -92,7 +96,8 @@ standard (the default); `75us` (US) and `50us` (EU) are the main-channel values;
 | 4 | `scan` survey mode: PSD, pilot/slot detection, AM-vs-FM classification, SNR | ✅ |
 | 3 | AM demod paths (`am-env`, `am-coherent` Costas); configurable `--mod` | ✅ |
 | — | `UsbSource` (local librtlsdr) — deferred; Pi + `rtl_tcp` covers live | |
-| 5 | Stretch: RDS decode, headless Pi daemon, arbitrary-rate resampler | |
+| — | Arbitrary-rate resampler (`--audio-rate`, any output rate) | ✅ |
+| 5 | Stretch: RDS decode, headless Pi daemon | |
 
 ## Project layout
 

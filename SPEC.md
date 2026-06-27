@@ -85,8 +85,8 @@ once at init; the hot path must not allocate.
   - **coherent DSB**: mix by recovered carrier and LPF. For a **pilotless** subcarrier
     (e.g. bleedthrough), use a **Costas loop** to recover phase.
 - `src/deemph.zig` — single-pole IIR de-emphasis (see §5).
-- `src/resample.zig` — rational resampler to the output audio rate (integer
-  decimation is fine for MVP; arbitrary-rate is a later upgrade).
+- `src/rateplan.zig` + `src/resampler.zig` — derive the full rate chain from the input
+  and `--audio-rate` targets, then a rational (L/M) resampler bridges to any output rate.
 - `src/detect.zig` — survey / classification mode (see §6). The differentiator.
 - `src/sink.zig` — `WavSink` (write `.wav`) and `AudioSink` (live playback via
   `miniaudio`, single-header C through `@cImport`). A lock-free ring buffer sits
@@ -144,17 +144,19 @@ Algorithm:
 1. FM demod the MPX, compute an averaged PSD (Welch) over 0–100 kHz.
 2. Detect the **19 kHz pilot** (⇒ stereo present).
 3. Find energy peaks near **57, 67, 92 kHz** (and report any other strong slots).
-4. For each detected subcarrier, **classify modulation** (FM is the default for US audio
-   subcarriers; commit to DSB only on positive evidence):
-   - Extract the slot to complex baseband.
-   - **Audio-likeness** (the FM discriminant): FM-demod the slot; a real audio program
-     concentrates in the low band, while demod noise has the rising "triangular" PSD
-     (∝ f²). Low/high band power ratio above threshold ⇒ **FM**. Deviation-independent,
-     so low-deviation SCAs still pass.
-   - **Carrier presence**: a suppressed-carrier DSB has a spectral null at center; FM and
-     carrier-AM have a center spike. Null + symmetric sidebands + broadband + real SNR
-     ⇒ **AM/DSB** (the 38 kHz stereo L−R).
-   - Otherwise (not audio-like, not DSB) ⇒ **unknown** (noise, data, or a bare carrier).
+4. For each detected subcarrier, **classify modulation** straight from the PSD — no
+   per-slot demodulation, so it stays cheap (a full scan is <1 s on a Pi 4):
+   - **Carrier presence** (the FM discriminant): the slot's center-bin power vs its
+     shoulders. A present carrier (center spike) ⇒ **FM**. This is content-independent —
+     a carrier reads the same whether its program is loud or silent, unlike an
+     audio-content metric (which mislabels a quiet SCA as noise).
+   - **Suppressed carrier**: a spectral null at center + symmetric sidebands + broadband
+     at real SNR ⇒ **AM/DSB** (the 38 kHz stereo L−R).
+   - **Standardized slots** assert their type by the FM standard regardless of the metric:
+     38 kHz ⇒ stereo (DSB-SC), 57 kHz ⇒ RDS (data).
+   - Otherwise ⇒ **unknown**. A non-standard slot is also dropped as an overload spur
+     unless it occupies a plausible bandwidth (neither a single-bin tone nor broadband
+     splatter).
 5. Estimate per-slot bandwidth and SNR.
 
 Labels stick to facts: standardized pilot-locked assignments (38 kHz stereo, 57 kHz RDS)
