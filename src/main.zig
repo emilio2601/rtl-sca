@@ -126,9 +126,12 @@ fn runPlay(init: std.process.Init, w: *Io.Writer, opts: cli.Options) !void {
 /// returning a Source that points at it. Caller closes via `source.close(io)`.
 fn openSource(
     io: std.Io,
+    gpa: std.mem.Allocator,
     opts: cli.Options,
+    running: *const Running,
     fsrc: *source_mod.FileSource,
     rsrc: *source_mod.RtlTcpSource,
+    usrc: *source_mod.UsbSource,
     reader_buf: []u8,
 ) !source_mod.Source {
     if (opts.rtl_tcp) |host_port| {
@@ -144,14 +147,18 @@ fn openSource(
             try fsrc.init(io, path, reader_buf);
             break :blk .{ .file = fsrc };
         },
-        .freq => error.LiveFreqNeedsRtlTcp,
+        .freq => |freq| blk: {
+            try usrc.init(gpa, running, opts.device, freq, opts.rate_hz, opts.gain, opts.ppm);
+            break :blk .{ .usb = usrc };
+        },
     };
 }
 
 fn driveSource(p: *pipeline.Pipeline, init: std.process.Init, opts: cli.Options, sink: sink_mod.Sink, running: *Running) !void {
     var fsrc: source_mod.FileSource = undefined;
     var rsrc: source_mod.RtlTcpSource = undefined;
-    const source = try openSource(init.io, opts, &fsrc, &rsrc, p.reader_buf);
+    var usrc: source_mod.UsbSource = undefined;
+    const source = try openSource(init.io, init.gpa, opts, running, &fsrc, &rsrc, &usrc, p.reader_buf);
     defer source.close(init.io);
     try p.run(init.io, source, sink, running);
 }
@@ -180,13 +187,14 @@ fn runScan(init: std.process.Init, w: *Io.Writer, opts: cli.Options) !void {
     const reader_buf = try a.alloc(u8, 1 << 16);
     const mpx_tmp = try a.alloc(f32, fe.outCap(max_iq));
 
-    var fsrc: source_mod.FileSource = undefined;
-    var rsrc: source_mod.RtlTcpSource = undefined;
-    const source = openSource(io, opts, &fsrc, &rsrc, reader_buf) catch |err| reportRun(w, err);
-    defer source.close(io);
-
     var running = Running.init(true);
     installSigint(&running);
+
+    var fsrc: source_mod.FileSource = undefined;
+    var rsrc: source_mod.RtlTcpSource = undefined;
+    var usrc: source_mod.UsbSource = undefined;
+    const source = openSource(io, init.gpa, opts, &running, &fsrc, &rsrc, &usrc, reader_buf) catch |err| reportRun(w, err);
+    defer source.close(io);
 
     var filled: usize = 0;
     while (running.load(.monotonic) and filled < cap) {
@@ -266,9 +274,12 @@ fn reportInit(w: *Io.Writer, err: pipeline.InitError) noreturn {
 
 fn reportRun(w: *Io.Writer, err: anyerror) noreturn {
     const msg: []const u8 = switch (err) {
-        error.LiveFreqNeedsRtlTcp => "a live radio frequency needs --rtl-tcp host:port (USB is a later phase)",
         error.RtlTcpNeedsFreq => "--rtl-tcp needs a frequency as the input, not a file",
         error.AudioInit, error.AudioStart => "could not open the audio output device",
+        error.UsbOpen => "could not open the RTL-SDR (is it plugged in? try --device N)",
+        error.UsbConfig => "could not configure the RTL-SDR (sample rate / freq / gain)",
+        error.UsbRead => "RTL-SDR read failed (device unplugged?)",
+        error.UsbThread => "could not start the RTL-SDR reader thread",
         else => @errorName(err),
     };
     w.print("rtl-sca: {s}\n", .{msg}) catch {};

@@ -35,6 +35,41 @@ pub fn build(b: *std.Build) void {
         root_mod.linkFramework("CoreFoundation", .{});
     }
 
+    // librtlsdr (USB IQ source). Clean C API → translate-c directly on the header,
+    // no shim. On Linux/Pi the lib lives on the default search path; on macOS it's
+    // under the Homebrew prefix, which is not searched by default.
+    const rtlsdr = b.addTranslateC(.{
+        .root_source_file = b.path("c/rtlsdr.h"),
+        .target = target,
+        .optimize = optimize,
+        .link_libc = true,
+    });
+    rtlsdr.addIncludePath(b.path("c"));
+    switch (target.result.os.tag) {
+        .macos => {
+            // Homebrew's prefix isn't on the default search path and differs by
+            // arch; ask brew where librtlsdr lives. Skip quietly if brew/the
+            // formula is absent — the link step then reports "library not found".
+            var code: u8 = undefined;
+            if (b.runAllowFail(&.{ "brew", "--prefix", "librtlsdr" }, &code, .ignore)) |out| {
+                const prefix = std.mem.trim(u8, out, " \t\r\n");
+                const inc = b.pathJoin(&.{ prefix, "include" });
+                rtlsdr.addIncludePath(.{ .cwd_relative = inc });
+                root_mod.addIncludePath(.{ .cwd_relative = inc });
+                root_mod.addLibraryPath(.{ .cwd_relative = b.pathJoin(&.{ prefix, "lib" }) });
+            } else |_| {}
+        },
+        else => {
+            // librtlsdr built from source (e.g. on Raspberry Pi OS) lands in
+            // /usr/local, which isn't always on the default search path.
+            rtlsdr.addIncludePath(.{ .cwd_relative = "/usr/local/include" });
+            root_mod.addIncludePath(.{ .cwd_relative = "/usr/local/include" });
+            root_mod.addLibraryPath(.{ .cwd_relative = "/usr/local/lib" });
+        },
+    }
+    root_mod.addImport("rtlsdr", rtlsdr.createModule());
+    root_mod.linkSystemLibrary("rtlsdr", .{});
+
     const exe = b.addExecutable(.{ .name = "rtl-sca", .root_module = root_mod });
     b.installArtifact(exe);
 
