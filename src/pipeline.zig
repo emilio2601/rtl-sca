@@ -191,6 +191,10 @@ pub const Pipeline = struct {
             if (dbg) |d| if (d.periodic and in_samples >= report_at) {
                 try self.logStats(d.w, source, sink, in_samples, busy_ns);
                 report_at += report_every;
+                // Window the signal metrics per -vv interval so each line reflects
+                // "now" — peak and clip% otherwise freeze/asymptote at a startup
+                // transient. Plumbing (stream time, drops, underruns) stays cumulative.
+                self.metrics = .{};
             };
         }
         try sink.finish(io);
