@@ -48,71 +48,39 @@ zig build run -- scan 89.9M
 rtl-sca <command> <input> [flags]
 ```
 
-`<input>` is auto-detected: a frequency (`89.9M`, `89900000`) tunes a radio — a local
-RTL-SDR by default, or an `rtl_tcp` server with `--remote`; anything else is treated
-as a recorded IQ file path.
+`<input>` auto-detects: a frequency (`89.9M`, `89900000`) tunes a radio — local by
+default, or an `rtl_tcp` server with `--remote`; anything else is a recorded IQ file.
+Live commands run until Ctrl-C (which finalizes the WAV).
 
 ```sh
-rtl-sca scan 89.9M                                           # survey a station live off a local dongle
-rtl-sca play 89.9M --sub 67k                                 # demodulate the 67 kHz SCA live
-rtl-sca rec  89.9M --sub 67k -o out.wav                      # record the SCA to a WAV (Ctrl-C to stop)
-rtl-sca scan capture.cu8                                     # survey a recorded IQ file instead
-rtl-sca play capture.cu8 --sub 0 --bw 15k --deemph 75us      # play a capture's mono program
-rtl-sca play 89.9M --remote raspberrypi.local --sub 0        # drive a remote radio over rtl_tcp
+rtl-sca scan 89.9M                                      # survey a station's MPX for subcarriers
+rtl-sca play 89.9M --sub 67k                            # demodulate the 67 kHz SCA live
+rtl-sca rec  89.9M --sub 67k -o out.wav                 # record the SCA to a WAV
+rtl-sca play 89.9M --sub 0 --bw 15k --deemph 75us       # main mono program (a quick front-end check)
+rtl-sca scan capture.cu8                                # survey a recorded IQ file
+rtl-sca play 89.9M --remote raspberrypi.local --sub 67k # drive a remote radio over rtl_tcp
 ```
-
-Live commands run until Ctrl-C (which finalizes the WAV). `--remote` takes a
-`host[:port]` — a literal IP (`192.168.1.50`) or a hostname (`raspberrypi.local`,
-or any DNS/mDNS name); the port defaults to rtl_tcp's `1234`. The positional `<input>`
-is then the tune frequency. Use `--device N` to pick among multiple local dongles.
-
-The **main program audio is the slot at 0 Hz**: `--sub 0` (with ~15 kHz bandwidth and
-75 µs de-emphasis) recovers normal mono FM. It's supported as a validation/utility
-mode — if the station is audible, the front-end and FM demod are proven before
-chasing a weak subcarrier. It recovers mono only; stereo (L−R) decode is out of scope.
-
-Key flags (run `rtl-sca` with no command for the full list):
 
 | flag | meaning | default |
 |------|---------|---------|
-| `--source PATH` | explicit file source (overrides the positional) | — |
-| `--remote HOST[:PORT]` | tune `<input>` over an `rtl_tcp` server (IP or hostname; port defaults to `1234`) | — |
 | `--sub HZ` | subcarrier center (`67k`, `92k`, …); `0` = main channel | `67k` |
-| `--bw HZ` | bandwidth to recover: audio width for `--sub 0`, slot width for a subcarrier (`8k` SCA, `15k` main) | `8k` |
+| `--bw HZ` | bandwidth recovered (slot width for a subcarrier, ±bw/2 → audio) | `8k` |
 | `--mod MODE` | `fm` \| `am-env` \| `am-coherent` | `fm` |
-| `--deemph TAU` | de-emphasis time constant (`120us`, `off`, …) | `150us` |
-| `--rate HZ` | RTL / recording sample rate | `1.024M` |
-| `--audio-rate HZ` | output audio rate (resampled to any rate) | `48k`¹ |
+| `--deemph TAU` | de-emphasis time constant (`150us`, `75us`, `off`, …) | `150us` |
+| `--remote H[:PORT]` | tune over an `rtl_tcp` server (IP or hostname) | — |
 | `--gain DB` | tuner gain (radio only) | auto |
-| `--device N` | USB dongle index (radio only) | `0` |
-| `--ppm N` | crystal correction in ppm (radio only) | `0` |
-| `-o FILE` | output WAV path (`rec`); `-` streams the WAV to stdout | — |
-| `-v`, `-vv` | diagnostics (see below) | off |
+| `-o FILE` | output WAV path (`rec`); `-` streams to stdout | — |
+| `-v`, `-vv` | diagnostics to stderr | off |
 
-De-emphasis is a continuous time constant, not a fixed set. `150us` is the SCA
-standard (the default); `75us` (US) and `50us` (EU) are the main-channel values;
-`off` is no de-emphasis.
-
-**Output streams.** All diagnostics — the startup summary, errors, the rate plan —
-go to **stderr**. `scan`'s results table goes to **stdout** (so `scan … > slots.txt`
-works), and `rec -o -` streams the WAV to **stdout**, leaving stderr free for the
-human output. So `rtl-sca rec 89.9M --sub 67k -o - | aplay` just works.
-
-**Verbose.** `play`/`rec` print a one-line startup summary to stderr regardless of
-`-v` (source, radio params, demod, recovered audio bandwidth). `-v` adds two things at
-exit: a **health** line (DSP speed vs. real time, USB sample drops, audio underruns)
-and a **signal** line (front-end level + clip %, Costas lock + carrier offset for
-`am-coherent`, output level + clip count) — the "is the signal good?" view, vs. the
-"is the plumbing flowing?" health line. In `scan`, `-v` also adds per-slot classifier
-metrics and the rate plan. `-vv` logs the health + signal lines live (~every 2 s).
-
-¹ A rational resampler bridges the internal content rate to any output rate. Live
-`play` defaults to the audio device's native rate; `rec`/files default to 48 kHz.
+Run `rtl-sca` with no command for the full flag list. **See [GUIDE.md](GUIDE.md)** for
+the details — bandwidth semantics, de-emphasis, output streams, diagnostics, and
+operating notes (gain/overload, the tune-in transient, rtl_tcp behavior).
 
 ## Project layout
 
 - `src/main.zig` — entry point; wires the CLI to the pipeline.
 - `src/cli.zig` — argument and subcommand parsing.
+- [`GUIDE.md`](GUIDE.md) — full usage reference and operating notes.
 - [`SPEC.md`](SPEC.md) — original design notes & signal-chain reference (Carson
   bandwidth, de-emphasis, the rate chain). The shipped code is now authoritative;
   kept for DSP background and rationale.
