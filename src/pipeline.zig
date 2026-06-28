@@ -85,9 +85,13 @@ pub const Pipeline = struct {
         self.deemph = Deemph.init(opts.deemph_us, plan.fs_chan);
         const cutoff_rs = 0.45 * @min(plan.fs_chan, @as(f64, @floatFromInt(plan.fs_audio)));
         self.resampler = try Resampler.build(a, plan.fs_chan, plan.resamp.l, plan.resamp.m, cutoff_rs);
-        // atan2 emits radians, not ±1; map the expected deviation toward full scale.
-        // The main MPX baseband is quieter than a demod'd SCA, so it needs more gain.
-        self.audio_gain = if (opts.sub_hz == 0) 3.0 else 1.0;
+        // Deviation-matched output scaling (GNU Radio convention, gain ∝ fs/Δf): the
+        // discriminator emits radians, bounded by the channel. An SCA slot peaks at
+        // ≈2π·(bw/2)/fs_chan ≈ 2.5 rad worst case (~1.9 typical), so 0.5 lands it just
+        // under ±1. The main channel is the raw MPX mono, whose peak deviation maps to
+        // ≈2π·75k/fs_demod ≈ 0.9 rad, so unity gain already lands it near full scale.
+        // The WAV/audio clamp catches rare over-deviation and FM clicks.
+        self.audio_gain = if (opts.sub_hz == 0) 1.0 else 0.5;
         self.plan = plan;
         self.fs_audio = plan.fs_audio;
 
