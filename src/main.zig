@@ -32,7 +32,10 @@ const usage =
     \\  --sub HZ          subcarrier center: 67k, 92k, ...; 0 = main channel (default 67k)
     \\  --bw HZ           bandwidth to recover: audio for --sub 0, slot for a
     \\                    subcarrier (e.g. 15k main, 8k SCA; default 8k)
-    \\  --mod MODE        fm | am-env | am-coherent (default fm)
+    \\  --mod MODE        demodulator (default fm):
+    \\                      fm           narrowband FM — most SCAs, the main channel
+    \\                      am-env       envelope AM — a carrier is present
+    \\                      am-coherent  synchronous AM — suppressed-carrier DSB-SC
     \\  --deemph TAU      de-emphasis time constant, e.g. 120us; off=none
     \\                    (default 150us SCA; 75us US, 50us EU main channel)
     \\  --rate HZ         RTL sample rate (default 1.024M)
@@ -84,10 +87,9 @@ fn runRec(init: std.process.Init, w: *Io.Writer, opts: cli.Options) !void {
     var p: pipeline.Pipeline = undefined;
     p.init(init.gpa, opts) catch |err| reportInit(w, err);
     defer p.deinit();
-    if (opts.verbose > 0) {
-        try printRatePlan(w, p.plan, true);
-        try w.flush();
-    }
+    try printSummary(w, opts, out_path);
+    if (opts.verbose > 0) try printRatePlan(w, p.plan, true);
+    try w.flush();
 
     var wsink: sink_mod.WavSink = undefined;
     var wbuf: [1 << 16]u8 = undefined;
@@ -111,10 +113,9 @@ fn runPlay(init: std.process.Init, w: *Io.Writer, opts: cli.Options) !void {
     var p: pipeline.Pipeline = undefined;
     p.init(init.gpa, o) catch |err| reportInit(w, err);
     defer p.deinit();
-    if (opts.verbose > 0) {
-        try printRatePlan(w, p.plan, true);
-        try w.flush();
-    }
+    try printSummary(w, opts, "speakers");
+    if (opts.verbose > 0) try printRatePlan(w, p.plan, true);
+    try w.flush();
 
     var ring_buf: [1 << 15]f32 = undefined; // ~0.7 s at 48 kHz
     var ring = ring_mod.Ring.init(&ring_buf);
@@ -324,6 +325,70 @@ fn printRatePlan(w: *Io.Writer, p: rateplan.RatePlan, audio_stages: bool) !void 
         try w.print(" → chan {d:.0} (÷{d}) → out {d} (×{d}/{d})", .{ p.fs_chan, p.d2, p.fs_audio, p.resamp.l, p.resamp.m });
     }
     try w.writeAll(" Hz\n");
+}
+
+fn modName(m: cli.Mod) []const u8 {
+    return switch (m) {
+        .fm => "fm",
+        .am_env => "am-env",
+        .am_coherent => "am-coherent",
+    };
+}
+
+/// One-line startup summary for `play`/`rec`, to stderr regardless of -v. Shows the
+/// source and the params we feed a live radio (gain/rate, and ppm when set), then
+/// the subcarrier, demod, and *recovered audio bandwidth* — which for a subcarrier
+/// is half of --bw (the slot width), a common point of confusion.
+fn printSummary(w: *Io.Writer, opts: cli.Options, dest: []const u8) !void {
+    try w.writeAll("rtl-sca: ");
+    if (opts.remote) |hp| {
+        try w.print("{d:.1} MHz · remote {s}", .{ freqMhz(opts), hp });
+        try printRadioParams(w, opts);
+    } else switch (opts.input) {
+        .file => |path| try w.writeAll(path),
+        .freq => {
+            try w.print("{d:.1} MHz · dongle {d}", .{ freqMhz(opts), opts.device });
+            try printRadioParams(w, opts);
+        },
+    }
+
+    if (opts.sub_hz == 0)
+        try w.writeAll(" · main channel")
+    else
+        try w.print(" · sub {d:.0} kHz", .{khz(opts.sub_hz)});
+
+    try w.print(" · {s}", .{modName(opts.mod)});
+
+    if (opts.sub_hz == 0)
+        try w.print(" · {d:.0} kHz audio", .{khz(opts.bw_hz)})
+    else
+        try w.print(" · slot {d:.0} kHz (audio ≤{d:.1} kHz)", .{ khz(opts.bw_hz), rateplan.channelCutoff(opts.sub_hz, opts.bw_hz) / 1000.0 });
+
+    if (opts.deemph_us == 0)
+        try w.writeAll(" · no deemph")
+    else
+        try w.print(" · {d:.0}µs deemph", .{opts.deemph_us});
+
+    try w.print(" → {s}\n", .{dest});
+}
+
+/// The radio knobs we feed a live source: gain (auto vs manual) and sample rate
+/// always; ppm only when non-zero. The device index is already shown by the caller.
+fn printRadioParams(w: *Io.Writer, opts: cli.Options) !void {
+    if (opts.gain) |g| try w.print(" · gain {d:.1} dB", .{g}) else try w.writeAll(" · gain auto");
+    try w.print(" · {d:.3} Msps", .{@as(f64, @floatFromInt(opts.rate_hz)) / 1e6});
+    if (opts.ppm != 0) try w.print(" · ppm {d}", .{opts.ppm});
+}
+
+fn freqMhz(opts: cli.Options) f64 {
+    return switch (opts.input) {
+        .freq => |f| @as(f64, @floatFromInt(f)) / 1e6,
+        .file => 0,
+    };
+}
+
+fn khz(hz: u32) f64 {
+    return @as(f64, @floatFromInt(hz)) / 1000.0;
 }
 
 test {
