@@ -34,29 +34,34 @@ pub fn genTaps(taps: []f32, fs_in: f64, cutoff_hz: f64, window: Window) void {
 }
 
 /// Decimating FIR over `Elem` (f32 for real signals, C32 for complex). Taps are
-/// real; a complex signal is filtered as two real convolutions. Caller owns the
-/// `taps` and `ring` slices (ring.len == taps.len), preallocated once.
+/// real; a complex signal is filtered as two real convolutions.
+///
+/// The history is a **mirror buffer**: `ring.len == 2 * taps.len`, and each input
+/// sample is written twice (at `w` and `w + n`). That keeps the most-recent `n`
+/// samples a *contiguous* slice `ring[w .. w + n]` regardless of wrap, so `dot`
+/// is a straight contiguous dot product that vectorizes. Taps here are
+/// linear-phase (symmetric), so the window can be read oldest→newest against
+/// taps directly. Caller owns `taps` and `ring`, preallocated once.
 pub fn FirDecim(comptime Elem: type) type {
     return struct {
         const Self = @This();
+        const lanes = std.simd.suggestVectorLength(f32) orelse 4;
 
         taps: []const f32,
-        ring: []Elem,
-        head: usize = 0,
+        ring: []Elem, // 2*n mirror buffer
+        n: usize, // taps.len
+        w: usize = 0, // write index in [0, n); also start of the live window
         phase: usize = 0,
         decim: usize,
 
         pub fn init(taps: []const f32, ring: []Elem, decim: usize) Self {
-            std.debug.assert(ring.len == taps.len);
+            std.debug.assert(ring.len == 2 * taps.len);
             for (ring) |*r| r.* = elemZero();
-            return .{ .taps = taps, .ring = ring, .decim = decim };
+            return .{ .taps = taps, .ring = ring, .n = taps.len, .decim = decim };
         }
 
         inline fn elemZero() Elem {
             return if (Elem == f32) 0 else Elem.zero;
-        }
-        inline fn mac(acc: Elem, x: Elem, t: f32) Elem {
-            return if (Elem == f32) acc + x * t else acc.add(x.scale(t));
         }
 
         /// Push `in`, append decimated outputs to `out`, return the count written.
@@ -64,9 +69,10 @@ pub fn FirDecim(comptime Elem: type) type {
         pub fn process(self: *Self, in: []const Elem, out: []Elem) usize {
             var n: usize = 0;
             for (in) |s| {
-                self.ring[self.head] = s;
-                self.head += 1;
-                if (self.head == self.ring.len) self.head = 0;
+                self.ring[self.w] = s;
+                self.ring[self.w + self.n] = s; // mirror copy
+                self.w += 1;
+                if (self.w == self.n) self.w = 0;
                 self.phase += 1;
                 if (self.phase == self.decim) {
                     self.phase = 0;
@@ -78,13 +84,59 @@ pub fn FirDecim(comptime Elem: type) type {
         }
 
         fn dot(self: *const Self) Elem {
-            var acc: Elem = elemZero();
-            var idx = self.head; // one past the newest sample
-            for (self.taps) |t| {
-                idx = if (idx == 0) self.ring.len - 1 else idx - 1;
-                acc = mac(acc, self.ring[idx], t);
+            @setFloatMode(.optimized); // allow FMA + reduction reassociation
+            const win = self.ring[self.w .. self.w + self.n]; // contiguous, oldest→newest
+            const L = lanes;
+            if (Elem == f32) {
+                const V = @Vector(L, f32);
+                var acc: V = @splat(0);
+                var j: usize = 0;
+                while (j + L <= self.n) : (j += L) {
+                    const wv: V = win[j..][0..L].*;
+                    const tv: V = self.taps[j..][0..L].*;
+                    acc += wv * tv;
+                }
+                var s = @reduce(.Add, acc);
+                while (j < self.n) : (j += 1) s += win[j] * self.taps[j];
+                return s;
+            } else {
+                // C32: reinterpret the window as interleaved f32 [re,im,...] and
+                // duplicate each tap across the pair, then split re/im at the end.
+                const dup: @Vector(2 * L, i32) = comptime blk: {
+                    var m: [2 * L]i32 = undefined;
+                    for (0..L) |k| {
+                        m[2 * k] = @intCast(k);
+                        m[2 * k + 1] = @intCast(k);
+                    }
+                    break :blk m;
+                };
+                const evn: @Vector(L, i32) = comptime blk: {
+                    var m: [L]i32 = undefined;
+                    for (0..L) |k| m[k] = @intCast(2 * k);
+                    break :blk m;
+                };
+                const odd: @Vector(L, i32) = comptime blk: {
+                    var m: [L]i32 = undefined;
+                    for (0..L) |k| m[k] = @intCast(2 * k + 1);
+                    break :blk m;
+                };
+                const Vf = @Vector(2 * L, f32);
+                const wf: [*]const f32 = @ptrCast(win.ptr);
+                var acc: Vf = @splat(0);
+                var j: usize = 0;
+                while (j + L <= self.n) : (j += L) {
+                    const wv: Vf = wf[2 * j ..][0 .. 2 * L].*;
+                    const tl: @Vector(L, f32) = self.taps[j..][0..L].*;
+                    acc += wv * @shuffle(f32, tl, undefined, dup);
+                }
+                var re = @reduce(.Add, @shuffle(f32, acc, undefined, evn));
+                var im = @reduce(.Add, @shuffle(f32, acc, undefined, odd));
+                while (j < self.n) : (j += 1) {
+                    re += wf[2 * j] * self.taps[j];
+                    im += wf[2 * j + 1] * self.taps[j];
+                }
+                return .{ .re = re, .im = im };
             }
-            return acc;
         }
     };
 }
@@ -103,14 +155,14 @@ pub fn build(comptime Elem: type, a: std.mem.Allocator, fs_in: f64, cutoff: f64,
     if (n > max_taps) return error.FilterTooSharp;
     const taps = try a.alloc(f32, n);
     genTaps(taps, fs_in, cutoff, .hamming);
-    const ring = try a.alloc(Elem, n);
+    const ring = try a.alloc(Elem, 2 * n); // mirror buffer
     return FirDecim(Elem).init(taps, ring, decim);
 }
 
 const testing = std.testing;
 
 fn gainAtReal(taps: []const f32, fs: f64, f: f64) f32 {
-    const ring = testing.allocator.alloc(f32, taps.len) catch unreachable;
+    const ring = testing.allocator.alloc(f32, 2 * taps.len) catch unreachable;
     defer testing.allocator.free(ring);
     var fir = FirDecim(f32).init(taps, ring, 1);
     var in: [8192]f32 = undefined;
@@ -141,8 +193,8 @@ test "passband passes, stopband rejected" {
 test "decimation output count and values are block-split invariant" {
     var taps: [65]f32 = undefined;
     genTaps(&taps, 256000, 8000, .hamming);
-    var ring1: [65]f32 = undefined;
-    var ring2: [65]f32 = undefined;
+    var ring1: [130]f32 = undefined;
+    var ring2: [130]f32 = undefined;
 
     var in: [1000]f32 = undefined;
     for (&in, 0..) |*s, i| s.* = @floatCast(@sin(2.0 * std.math.pi * 1234.0 * @as(f64, @floatFromInt(i)) / 256000.0));
@@ -164,7 +216,7 @@ test "decimation output count and values are block-split invariant" {
 test "complex FIR filters re and im independently" {
     var taps: [65]f32 = undefined;
     genTaps(&taps, 256000, 8000, .hamming);
-    var ring: [65]C32 = undefined;
+    var ring: [130]C32 = undefined;
     var fir = FirDecim(C32).init(&taps, &ring, 1);
 
     var in: [256]C32 = undefined;

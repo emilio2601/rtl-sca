@@ -1,6 +1,8 @@
 const std = @import("std");
 
-pub const C32 = struct {
+// extern layout: re then im, contiguous, no padding — the vectorized FIR
+// reinterprets []C32 as interleaved f32 for SIMD.
+pub const C32 = extern struct {
     re: f32,
     im: f32,
 
