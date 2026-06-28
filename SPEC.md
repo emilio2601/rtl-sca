@@ -267,13 +267,27 @@ Flags:
   USB source only.
 - `--ppm` crystal frequency-error correction in ppm (default `0`). Radio-only;
   forwarded over `rtl_tcp` too.
-- `-o` output WAV path for `rec`.
+- `-o` output WAV path for `rec`; `-` streams the WAV to stdout (a non-seekable
+  pipe, so the header advertises an unknown length instead of being back-patched).
 
 Radio-only flags (`--gain`, `--ppm`, `--device`, `--remote`) are an error when the
 input is a file source.
 
 Frequency tokens (the positional, `--sub`, `--rate`) accept a `k`/`M`/`G` suffix or
-raw Hz. Value flags accept both `--flag value` and `--flag=value`.
+raw Hz. Value flags accept both `--flag value` and `--flag=value`. A flag value that
+looks like another option (e.g. `--sub --bw`) is a "missing value" error, not a
+silent swallow; negative numbers (`--ppm -12`) are still values.
+
+**Output streams.** Diagnostics (startup summary, errors, rate plan, the `-v`/`-vv`
+health + signal lines) go to **stderr**. The `scan` results table and a `rec -o -`
+WAV go to **stdout**, so results pipe/redirect cleanly while diagnostics stay visible.
+
+**Verbosity ladder.** Default: the startup summary + outcome/errors. `-v`: derived
+config (rate plan) + an end-of-run quality readout — a *health* line (DSP vs. real
+time, USB drops, underruns) and a *signal* line (input level/clip, Costas lock + Δf
+for `am-coherent`, output level/clip). `-vv`: the same metrics sampled live. Each
+level answers a distinct question (what am I doing / is it configured & healthy / how
+is it behaving over time) rather than accreting flags.
 
 ---
 

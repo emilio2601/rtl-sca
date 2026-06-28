@@ -86,17 +86,25 @@ Key flags (run `rtl-sca` with no command for the full list):
 | `--gain DB` | tuner gain (radio only) | auto |
 | `--device N` | USB dongle index (radio only) | `0` |
 | `--ppm N` | crystal correction in ppm (radio only) | `0` |
-| `-o FILE` | output WAV path (`rec`) | — |
+| `-o FILE` | output WAV path (`rec`); `-` streams the WAV to stdout | — |
 | `-v`, `-vv` | diagnostics (see below) | off |
 
 De-emphasis is a continuous time constant, not a fixed set. `150us` is the SCA
 standard (the default); `75us` (US) and `50us` (EU) are the main-channel values;
 `off` is no de-emphasis.
 
-**Verbose.** `-v` prints the derived rate plan and a one-line health summary at exit
-(DSP speed vs. real time, USB sample drops, audio underruns); in `scan` it also adds
-per-slot classifier metrics. `-vv` logs that health line live (~every 2 s) so you can
-watch for drops or underruns during a long capture.
+**Output streams.** All diagnostics — the startup summary, errors, the rate plan —
+go to **stderr**. `scan`'s results table goes to **stdout** (so `scan … > slots.txt`
+works), and `rec -o -` streams the WAV to **stdout**, leaving stderr free for the
+human output. So `rtl-sca rec 89.9M --sub 67k -o - | aplay` just works.
+
+**Verbose.** `play`/`rec` print a one-line startup summary to stderr regardless of
+`-v` (source, radio params, demod, recovered audio bandwidth). `-v` adds two things at
+exit: a **health** line (DSP speed vs. real time, USB sample drops, audio underruns)
+and a **signal** line (front-end level + clip %, Costas lock + carrier offset for
+`am-coherent`, output level + clip count) — the "is the signal good?" view, vs. the
+"is the plumbing flowing?" health line. In `scan`, `-v` also adds per-slot classifier
+metrics and the rate plan. `-vv` logs the health + signal lines live (~every 2 s).
 
 ¹ A rational resampler bridges the internal content rate to any output rate. Live
 `play` defaults to the audio device's native rate; `rec`/files default to 48 kHz.
