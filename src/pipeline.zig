@@ -24,6 +24,18 @@ const CHUNK_BYTES: usize = 1 << 16;
 
 pub const InitError = error{SubcarrierAboveNyquist} || frontend_mod.Error || rateplan.Error;
 
+/// Signal-quality counters for the `-v`/`-vv` readout — input/output peak level
+/// and clip counts. Accumulated only when a Debug sink is attached, so the
+/// default hot path is untouched.
+const Metrics = struct {
+    in_peak: f32 = 0, // peak |I|,|Q|, normalized to [0,1] (1.0 = ADC rail)
+    in_clip: u64 = 0, // IQ samples at/over ~0.98 of full scale
+    in_n: u64 = 0,
+    out_peak: f32 = 0, // peak |audio|
+    out_clip: u64 = 0, // audio samples that hit ±1.0 (would clamp in the WAV)
+    out_n: u64 = 0,
+};
+
 /// The full offline `rec` chain. Owns an arena holding every DSP buffer, sized
 /// once at init; the per-sample path never allocates.
 pub const Pipeline = struct {
@@ -36,6 +48,7 @@ pub const Pipeline = struct {
     plan: rateplan.RatePlan,
     audio_gain: f32,
     fs_audio: u32,
+    metrics: Metrics = .{},
 
     // buffers
     reader_buf: []u8,
@@ -108,6 +121,30 @@ pub const Pipeline = struct {
         };
     }
 
+    /// Front-end level: peak |I|,|Q| and how often the ADC railed (clipping ⇒ gain
+    /// too high; a very low peak ⇒ too low). Only called under `-v`/`-vv`.
+    fn accInput(self: *Pipeline, iq: []const C32) void {
+        const m = &self.metrics;
+        for (iq) |c| {
+            const a = @max(@abs(c.re), @abs(c.im));
+            if (a > m.in_peak) m.in_peak = a;
+            if (a >= 0.98) m.in_clip += 1;
+        }
+        m.in_n += iq.len;
+    }
+
+    /// Output level: peak |audio| and how many samples would clamp at ±1.0. Only
+    /// called under `-v`/`-vv`.
+    fn accOutput(self: *Pipeline, audio: []const f32) void {
+        const m = &self.metrics;
+        for (audio) |s| {
+            const a = @abs(s);
+            if (a > m.out_peak) m.out_peak = a;
+            if (a >= 1.0) m.out_clip += 1;
+        }
+        m.out_n += audio.len;
+    }
+
     /// Optional runtime diagnostics for `run` (driven by `-v`/`-vv`). Logged to
     /// `w` (stderr); `periodic` adds an in-flight line roughly every 2 s of stream.
     pub const Debug = struct {
@@ -119,6 +156,7 @@ pub const Pipeline = struct {
     /// or `running` is cleared (SIGINT for live sources), then finalize the sink.
     pub fn run(self: *Pipeline, io: std.Io, source: Source, sink: Sink, running: *Running, dbg: ?Debug) !void {
         const fmt = source.format();
+        self.metrics = .{};
         var busy_ns: u64 = 0; // wall time spent in the DSP (vs. blocked on I/O)
         var in_samples: u64 = 0;
         const report_every: u64 = @intFromFloat(2.0 * self.plan.fs_iq);
@@ -128,10 +166,12 @@ pub const Pipeline = struct {
             const nb = try source.read(self.block[0..CHUNK_BYTES]);
             if (nb == 0) break; // EOF (file source)
             const niq = self.unpack(fmt, self.block[0..nb]);
+            if (dbg != null) self.accInput(self.iq[0..niq]); // before t0: not counted as DSP time
             const t0 = std.Io.Clock.awake.now(io);
             const na = self.processIq(self.iq[0..niq]);
             for (self.audio[0..na]) |*s| s.* *= self.audio_gain;
             busy_ns += @intCast(t0.durationTo(std.Io.Clock.awake.now(io)).nanoseconds);
+            if (dbg != null) self.accOutput(self.audio[0..na]);
             try sink.writeAudio(self.audio[0..na]);
 
             in_samples += niq;
@@ -166,9 +206,30 @@ pub const Pipeline = struct {
             try w.print(" | aud ring {d}%, underruns {d}", .{ 100 * rf.used / rf.capacity, sink.underruns() });
         }
         try w.writeAll("\n");
+
+        // signal-quality line: front-end level/clip, Costas lock (am-coherent),
+        // and output level/clip — the "is the signal good" view (vs. plumbing above).
+        const m = self.metrics;
+        if (m.in_n > 0) {
+            try w.print("signal  : in {d:.1} dBFS, clip {d:.2}%", .{ dbfs(m.in_peak), inClipPct(m) });
+            if (self.sub.demodStats()) |ds| {
+                const df = @as(f64, ds.freq) * self.plan.fs_chan / (2.0 * std.math.pi);
+                try w.print(" | lock {d:.2}, Δf {d:.0} Hz", .{ ds.lock, df });
+            }
+            if (m.out_n > 0) try w.print(" | out {d:.1} dBFS, clip {d}", .{ dbfs(m.out_peak), m.out_clip });
+            try w.writeAll("\n");
+        }
         try w.flush();
     }
 };
+
+fn dbfs(peak: f32) f64 {
+    return 20.0 * std.math.log10(@as(f64, peak) + 1e-9);
+}
+
+fn inClipPct(m: Metrics) f64 {
+    return 100.0 * @as(f64, @floatFromInt(m.in_clip)) / @as(f64, @floatFromInt(m.in_n));
+}
 
 // ── tests ──
 const testing = std.testing;

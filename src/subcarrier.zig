@@ -88,6 +88,18 @@ pub const Subcarrier = union(enum) {
         } };
     }
 
+    /// Costas-loop diagnostics, when the active demod is `am-coherent` (else null):
+    /// `lock` quality ∈ [−1,1] and the residual carrier offset `freq` in rad/sample.
+    pub fn demodStats(self: *const Subcarrier) ?am.LoopStats {
+        switch (self.*) {
+            .sca => |*s| switch (s.demod) {
+                .am_coherent => |*d| return d.stats(),
+                else => return null,
+            },
+            .main => return null,
+        }
+    }
+
     /// Consume a 256 ksps MPX block, append 16 ksps audio to `audio`, return count.
     pub fn process(self: *Subcarrier, mpx: []const f32, audio: []f32) usize {
         switch (self.*) {

@@ -1,6 +1,10 @@
 const std = @import("std");
 const C32 = @import("complex.zig").C32;
 
+/// Costas-loop diagnostics: `lock` quality ∈ [−1, 1] and residual carrier offset
+/// `freq` in rad/sample.
+pub const LoopStats = struct { lock: f32, freq: f32 };
+
 /// Incoherent AM: envelope detection (|z|) with a one-pole DC block. Works for
 /// AM-with-carrier; on suppressed-carrier DSB it yields the rectified message
 /// (use AmCoherent for clean DSB). One output per input.
@@ -27,11 +31,21 @@ pub const AmCoherent = struct {
     phase: f32 = 0,
     freq: f32 = 0,
     dc: f32 = 0,
+    /// Lock quality: an EMA of cos(2·phase_error) ∈ [−1, 1]; →1 when locked, ~0
+    /// when the loop is hunting. Read via `stats` for the `-v` signal readout.
+    lock: f32 = 0,
     // 2nd-order loop, ζ≈0.7, loop BW ~ fs/200; clamp freq to keep it from running away.
     const alpha: f32 = 0.044;
     const beta: f32 = 0.001;
     const dc_a: f32 = 0.001;
+    const lock_a: f32 = 0.0005; // lock EMA at the channel rate (~16–44 ksps)
     const freq_clamp: f32 = 0.5; // rad/sample
+
+    /// Loop state for diagnostics: `lock` quality and the residual carrier
+    /// frequency error `freq` in rad/sample (caller scales by fs/2π for Hz).
+    pub fn stats(self: *const AmCoherent) LoopStats {
+        return .{ .lock = self.lock, .freq = self.freq };
+    }
 
     pub fn process(self: *AmCoherent, z: []const C32, out: []f32) usize {
         std.debug.assert(out.len >= z.len);
@@ -42,7 +56,9 @@ pub const AmCoherent = struct {
             const qd = c.im * cs - c.re * sn;
             // Amplitude-normalized phase detector = ½·sin(2·error); without the
             // 1/power the loop gain swings with the signal and goes unstable.
-            const err = (in_i * qd) / (in_i * in_i + qd * qd + 1e-6);
+            const pw = in_i * in_i + qd * qd + 1e-6;
+            const err = (in_i * qd) / pw;
+            self.lock += lock_a * ((in_i * in_i - qd * qd) / pw - self.lock); // cos(2·err)
             self.freq = std.math.clamp(self.freq + beta * err, -freq_clamp, freq_clamp);
             self.phase += self.freq + alpha * err;
             if (self.phase > std.math.pi) self.phase -= 2 * std.math.pi;
@@ -104,6 +120,8 @@ test "AmCoherent recovers DSB-SC under a carrier offset" {
     _ = d.process(&z, &out);
     // after lock-in (skip first half), |correlation| with the message is high
     try testing.expect(@abs(corr(out[8000..], msg[8000..])) > 0.9);
+    // and the loop reports itself locked
+    try testing.expect(d.stats().lock > 0.8);
 }
 
 test "AmEnv DC block removes a constant bias" {
