@@ -13,7 +13,7 @@ pub const Input = union(enum) {
 pub const Options = struct {
     command: Command,
     input: Input,
-    rtl_tcp: ?[]const u8 = null,
+    remote: ?[]const u8 = null, // rtl_tcp server as host:port (literal IP or hostname)
     sub_hz: u32 = 67_000, // 0 = main program channel
     /// Unique bandwidth to recover, Hz: the audio bandwidth for the main channel
     /// (`sub` 0), or the slot width for a subcarrier (~8k SCA voice, ~15k main).
@@ -76,8 +76,8 @@ pub fn parse(args: []const [:0]const u8) Error!Options {
                 o.verbose +|= n; // saturating: -v, -vv, ... and --verbose all add up
             } else if (std.mem.eql(u8, name, "--source")) {
                 source_path = try value(args, &i, inline_val);
-            } else if (std.mem.eql(u8, name, "--rtl-tcp")) {
-                o.rtl_tcp = try value(args, &i, inline_val);
+            } else if (std.mem.eql(u8, name, "--remote")) {
+                o.remote = try value(args, &i, inline_val);
                 radio_flag = name;
             } else if (std.mem.eql(u8, name, "--sub")) {
                 o.sub_hz = try parseFreq(try value(args, &i, inline_val));
@@ -199,7 +199,7 @@ pub fn errorText(err: Error) []const u8 {
         error.BadGain => "invalid --gain",
         error.BadDevice => "invalid --device (expected an integer index)",
         error.BadPpm => "invalid --ppm (expected an integer)",
-        error.RadioFlagWithFile => "radio-only flag (--gain/--ppm/--device/--rtl-tcp) used with a file source",
+        error.RadioFlagWithFile => "radio-only flag (--gain/--ppm/--device/--remote) used with a file source",
         error.MissingOutput => "rec requires -o <file.wav>",
     };
 }
@@ -258,6 +258,18 @@ test "play from file with flags" {
     try testing.expectEqual(@as(u32, 86_000), o.sub_hz);
     try testing.expectEqual(Mod.am_env, o.mod);
     try testing.expectEqual(@as(f64, 0), o.deemph_us);
+}
+
+test "--remote sets the rtl_tcp server (host:port kept verbatim)" {
+    const ip = [_][:0]const u8{ "rtl-sca", "scan", "89.9M", "--remote", "192.168.1.50:1234" };
+    try testing.expectEqualStrings("192.168.1.50:1234", (try parse(&ip)).remote.?);
+
+    const host = [_][:0]const u8{ "rtl-sca", "scan", "89.9M", "--remote=pi4:1234" };
+    try testing.expectEqualStrings("pi4:1234", (try parse(&host)).remote.?);
+
+    // --remote is radio-only: rejected with a file source.
+    const withFile = [_][:0]const u8{ "rtl-sca", "scan", "capture.cu8", "--remote", "pi4:1234" };
+    try testing.expectError(error.RadioFlagWithFile, parse(&withFile));
 }
 
 test "radio knobs: device, ppm, gain" {

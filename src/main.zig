@@ -28,7 +28,7 @@ const usage =
     \\
     \\flags:
     \\  --source PATH     explicit file source (overrides the positional)
-    \\  --rtl-tcp H:PORT  use an rtl_tcp network server (tune <input> over it)
+    \\  --remote H:PORT   tune <input> over an rtl_tcp server (IP or hostname)
     \\  --sub HZ          subcarrier center: 67k, 92k, ...; 0 = main channel (default 67k)
     \\  --bw HZ           bandwidth to recover: audio for --sub 0, slot for a
     \\                    subcarrier (e.g. 15k main, 8k SCA; default 8k)
@@ -135,7 +135,7 @@ fn openSource(
     usrc: *source_mod.UsbSource,
     reader_buf: []u8,
 ) !source_mod.Source {
-    if (opts.rtl_tcp) |host_port| {
+    if (opts.remote) |host_port| {
         const freq = switch (opts.input) {
             .freq => |f| f,
             .file => return error.RtlTcpNeedsFreq,
@@ -290,7 +290,7 @@ fn reportInit(w: *Io.Writer, err: pipeline.InitError) noreturn {
 
 fn reportRun(w: *Io.Writer, err: anyerror) noreturn {
     const msg: []const u8 = switch (err) {
-        error.RtlTcpNeedsFreq => "--rtl-tcp needs a frequency as the input, not a file",
+        error.RtlTcpNeedsFreq => "--remote needs a frequency as the input, not a file",
         error.AudioInit, error.AudioStart => "could not open the audio output device",
         error.UsbOpen => "could not open the RTL-SDR (is it plugged in? try --device N)",
         error.UsbConfig => "could not configure the RTL-SDR (sample rate / freq / gain)",

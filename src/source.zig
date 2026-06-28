@@ -61,6 +61,22 @@ fn encodeCmd(cmd: u8, param: u32) [5]u8 {
     return b;
 }
 
+/// Connect to an rtl_tcp server given `host:port`. Tries a literal IP first —
+/// the fast path, and the only form that carries `[ipv6]:port` — then falls back
+/// to resolving the host as a name through the OS resolver (DNS + /etc/hosts), so
+/// `pi4:1234`, Tailscale MagicDNS names, etc. all work. This mirrors getaddrinfo's
+/// numeric-host-then-resolve order; std keeps the literal and name paths as
+/// separate typed entry points, so the branch (not a single helper) is the idiom.
+fn connectHostPort(io: std.Io, host_port: []const u8) !net.Stream {
+    if (net.IpAddress.parseLiteral(host_port)) |addr| {
+        return addr.connect(io, .{ .mode = .stream });
+    } else |_| {}
+    const colon = std.mem.lastIndexOfScalar(u8, host_port, ':') orelse return error.InvalidAddress;
+    const name = try net.HostName.init(host_port[0..colon]);
+    const port = std.fmt.parseInt(u16, host_port[colon + 1 ..], 10) catch return error.InvalidPort;
+    return name.connect(io, port, .{ .mode = .stream });
+}
+
 /// Streams cu8 IQ from an `rtl_tcp` server. Connects, reads the 12-byte greeting,
 /// sends the tune/rate/gain/ppm commands, then `read()` pulls IQ. Constructed in
 /// place (Stream.Reader must keep a stable address). Always cu8 over the wire.
@@ -79,8 +95,7 @@ pub const RtlTcpSource = struct {
         ppm: i32,
         rbuf: []u8,
     ) !void {
-        const addr = try net.IpAddress.parseLiteral(host_port);
-        const stream = try addr.connect(io, .{ .mode = .stream });
+        const stream = try connectHostPort(io, host_port);
         self.* = .{ .stream = stream, .reader = undefined };
         self.reader = self.stream.reader(io, rbuf);
 

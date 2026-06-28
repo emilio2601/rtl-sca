@@ -34,7 +34,7 @@ and `rec` then decode to intelligible audio, drop-free in real time.
   automatically in `build.zig`). [miniaudio](https://miniaud.io) is fetched by the
   package manager (`build.zig.zon`) — nothing to install.
 - An **RTL-SDR dongle** for live use; files need no hardware. To drive a radio on
-  another host, run `rtl_tcp -a 0.0.0.0 -f <freq> -s 1024000` there and pass `--rtl-tcp`.
+  another host, run `rtl_tcp -a 0.0.0.0 -f <freq> -s 1024000` there and pass `--remote`.
 
 ## Build
 
@@ -51,7 +51,7 @@ rtl-sca <command> <input> [flags]
 ```
 
 `<input>` is auto-detected: a frequency (`89.9M`, `89900000`) tunes a radio — a local
-RTL-SDR by default, or an `rtl_tcp` server with `--rtl-tcp`; anything else is treated
+RTL-SDR by default, or an `rtl_tcp` server with `--remote`; anything else is treated
 as a recorded IQ file path.
 
 ```sh
@@ -60,12 +60,13 @@ rtl-sca play 89.9M --sub 67k                                 # demodulate the 67
 rtl-sca rec  89.9M --sub 67k -o out.wav                      # record the SCA to a WAV (Ctrl-C to stop)
 rtl-sca scan capture.cu8                                     # survey a recorded IQ file instead
 rtl-sca play capture.cu8 --sub 0 --bw 15k --deemph 75us      # play a capture's mono program
-rtl-sca play 89.9M --rtl-tcp 192.168.1.50:1234 --sub 0       # drive a remote radio over rtl_tcp
+rtl-sca play 89.9M --remote pi4:1234 --sub 0                 # drive a remote radio over rtl_tcp
 ```
 
-Live commands run until Ctrl-C (which finalizes the WAV). `--rtl-tcp` takes an
-`IP:port` (numeric IP); the positional `<input>` is then the tune frequency. Use
-`--device N` to pick among multiple local dongles.
+Live commands run until Ctrl-C (which finalizes the WAV). `--remote` takes a
+`host:port` — a literal IP (`192.168.1.50:1234`) or a hostname (`pi4:1234`,
+`pi4.local:1234`, a Tailscale name); the positional `<input>` is then the tune
+frequency. Use `--device N` to pick among multiple local dongles.
 
 The **main program audio is the slot at 0 Hz**: `--sub 0` (with ~15 kHz bandwidth and
 75 µs de-emphasis) recovers normal mono FM. It's supported as a validation/utility
@@ -77,7 +78,7 @@ Key flags (run `rtl-sca` with no command for the full list):
 | flag | meaning | default |
 |------|---------|---------|
 | `--source PATH` | explicit file source (overrides the positional) | — |
-| `--rtl-tcp H:PORT` | tune `<input>` over an `rtl_tcp` network server | — |
+| `--remote H:PORT` | tune `<input>` over an `rtl_tcp` server (IP or hostname) | — |
 | `--sub HZ` | subcarrier center (`67k`, `92k`, …); `0` = main channel | `67k` |
 | `--bw HZ` | bandwidth to recover: audio width for `--sub 0`, slot width for a subcarrier (`8k` SCA, `15k` main) | `8k` |
 | `--mod MODE` | `fm` \| `am-env` \| `am-coherent` | `fm` |

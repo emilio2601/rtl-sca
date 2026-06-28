@@ -243,7 +243,8 @@ Form: `rtl-sca <command> <input> [flags]`.
 Flags:
 - `--source` file path; explicit, unambiguous override of the positional (use in
   scripts, or for a file whose name looks like a frequency). Implies `FileSource`.
-- `--rtl-tcp host:port` to use a network source.
+- `--remote host:port` to use a network (`rtl_tcp`) source. The host is a literal IP
+  or a name resolved through the OS (DNS / `/etc/hosts` / mDNS / Tailscale).
 - `--sub` subcarrier center (`67k`, `92k`, arbitrary Hz). Default `67k`. `--sub 0`
   selects the **main program channel** (use `--bw 15k --deemph 75us` with it).
 - `--bw` subcarrier channel bandwidth (default ~`8k`, SCA voice; `~15k` for the main
@@ -263,7 +264,7 @@ Flags:
   forwarded over `rtl_tcp` too.
 - `-o` output WAV path for `rec`.
 
-Radio-only flags (`--gain`, `--ppm`, `--device`, `--rtl-tcp`) are an error when the
+Radio-only flags (`--gain`, `--ppm`, `--device`, `--remote`) are an error when the
 input is a file source.
 
 Frequency tokens (the positional, `--sub`, `--rate`) accept a `k`/`M`/`G` suffix or
