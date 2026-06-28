@@ -15,7 +15,8 @@ pub const Options = struct {
     input: Input,
     rtl_tcp: ?[]const u8 = null,
     sub_hz: u32 = 67_000, // 0 = main program channel
-    /// Channel bandwidth in Hz (~8k SCA voice, ~15k main channel).
+    /// Unique bandwidth to recover, Hz: the audio bandwidth for the main channel
+    /// (`sub` 0), or the slot width for a subcarrier (~8k SCA voice, ~15k main).
     bw_hz: u32 = 8_000,
     mod: Mod = .fm,
     /// De-emphasis time constant in microseconds; 0 = off. Feeds

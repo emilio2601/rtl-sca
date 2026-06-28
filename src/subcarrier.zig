@@ -5,6 +5,7 @@ const am = @import("demod_am.zig");
 const fir = @import("firdecim.zig");
 const Nco = @import("nco.zig").Nco;
 const Mod = @import("cli.zig").Mod;
+const channelCutoff = @import("rateplan.zig").channelCutoff;
 
 const FirR = fir.FirDecim(f32);
 const FirC = fir.FirDecim(C32);
@@ -61,7 +62,7 @@ pub const Subcarrier = union(enum) {
         max_in: usize,
         mod: Mod,
     ) Error!Subcarrier {
-        const cutoff: f64 = @as(f64, @floatFromInt(bw_hz)) / 2.0;
+        const cutoff = channelCutoff(sub_hz, bw_hz);
         if (cutoff <= 0) return error.BadBandwidth;
 
         if (sub_hz == 0) {
@@ -146,10 +147,13 @@ test "main branch recovers a baseband tone with no NCO/second demod" {
         s.* = @floatCast(@cos(2.0 * std.math.pi * 1000.0 * @as(f64, @floatFromInt(i)) / 256000.0));
     }
 
-    var sub = try Subcarrier.init(arena.allocator(), 0, 15000, 256000, 16, n, .fm);
-    var audio: [n / 16 + 2]f32 = undefined;
+    // bw 15k on the main channel cuts at 15 kHz, so the content rate must clear
+    // it (the planner picks d2=6 → fs_chan ≈ 42.7 kHz), not the SCA's d2=16.
+    const d2 = 6;
+    var sub = try Subcarrier.init(arena.allocator(), 0, 15000, 256000, d2, n, .fm);
+    var audio: [n / d2 + 2]f32 = undefined;
     const na = sub.process(&mpx, &audio);
 
-    const dom = tu.toneDominance(audio[256..na], 1000, 2500, 16000);
+    const dom = tu.toneDominance(audio[256..na], 1000, 2500, 256000.0 / @as(f64, d2));
     try testing.expect(dom > 50);
 }

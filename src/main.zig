@@ -30,7 +30,8 @@ const usage =
     \\  --source PATH     explicit file source (overrides the positional)
     \\  --rtl-tcp H:PORT  use an rtl_tcp network server (tune <input> over it)
     \\  --sub HZ          subcarrier center: 67k, 92k, ...; 0 = main channel (default 67k)
-    \\  --bw HZ           channel bandwidth: 8k SCA, 15k main (default 8k)
+    \\  --bw HZ           bandwidth to recover: audio for --sub 0, slot for a
+    \\                    subcarrier (e.g. 15k main, 8k SCA; default 8k)
     \\  --mod MODE        fm | am-env | am-coherent (default fm)
     \\  --deemph TAU      de-emphasis time constant, e.g. 120us; off=none
     \\                    (default 150us SCA; 75us US, 50us EU main channel)
@@ -177,7 +178,7 @@ fn runScan(init: std.process.Init, w: *Io.Writer, opts: cli.Options) !void {
     const a = arena.allocator();
 
     const max_iq = scan_read_bytes / 2;
-    const plan = rateplan.plan(opts.rate_hz, opts.audio_rate_hz orelse 48_000, opts.bw_hz) catch |err| reportInit(w, err);
+    const plan = rateplan.plan(opts.rate_hz, opts.audio_rate_hz orelse 48_000, opts.sub_hz, opts.bw_hz) catch |err| reportInit(w, err);
     var fe = frontend_mod.Frontend.init(a, plan, max_iq) catch |err| reportInit(w, err);
     if (opts.verbose > 0) {
         try printRatePlan(w, plan, false);

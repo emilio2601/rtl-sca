@@ -55,11 +55,12 @@ pub const Pipeline = struct {
         // null reaches here only for `rec` (play resolves the device rate first);
         // file output defaults to 48 kHz.
         const fs_audio_target = opts.audio_rate_hz orelse 48_000;
-        const plan = try rateplan.plan(opts.rate_hz, fs_audio_target, opts.bw_hz);
+        const plan = try rateplan.plan(opts.rate_hz, fs_audio_target, opts.sub_hz, opts.bw_hz);
         self.frontend = try Frontend.init(a, plan, max_iq);
         const fs_mpx = plan.fs_mpx;
 
-        const slot_edge: f64 = @floatFromInt(opts.sub_hz + opts.bw_hz / 2);
+        // Upper edge of the isolated channel: sub + the (unique-bandwidth) cutoff.
+        const slot_edge = @as(f64, @floatFromInt(opts.sub_hz)) + rateplan.channelCutoff(opts.sub_hz, opts.bw_hz);
         if (slot_edge >= fs_mpx * 0.43) return error.SubcarrierAboveNyquist;
 
         // ── stages ──

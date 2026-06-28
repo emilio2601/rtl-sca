@@ -51,7 +51,16 @@ fn largestDivisorLE(n: usize, cap: usize) usize {
     return d;
 }
 
-pub fn plan(fs_iq_hz: u32, fs_audio_target: u32, bw_hz: u32) Error!RatePlan {
+/// Baseband low-pass cutoff that isolates `bw_hz` of *unique* spectrum. `--bw`
+/// always means the unique bandwidth recovered: the real main channel (sub==0)
+/// keeps `bw` of audio (cut at bw), while a complex subcarrier slot is `bw` wide
+/// (±bw/2). The real/complex factor of 2 is hidden here, not in the flag.
+pub fn channelCutoff(sub_hz: u32, bw_hz: u32) f64 {
+    const bw: f64 = @floatFromInt(bw_hz);
+    return if (sub_hz == 0) bw else bw / 2.0;
+}
+
+pub fn plan(fs_iq_hz: u32, fs_audio_target: u32, sub_hz: u32, bw_hz: u32) Error!RatePlan {
     const fs_iq_u: usize = fs_iq_hz;
     const fs_iq: f64 = @floatFromInt(fs_iq_hz);
 
@@ -69,11 +78,11 @@ pub fn plan(fs_iq_hz: u32, fs_audio_target: u32, bw_hz: u32) Error!RatePlan {
     const d1 = d_total / d0;
     const fs_demod = fs_iq / @as(f64, @floatFromInt(d0));
 
-    // Audio side: the channel rate serves the *content* (the bw/2 cut plus
+    // Audio side: the channel rate serves the *content* (the channel cutoff plus
     // transition margin), independent of the output rate — main mono (15 kHz)
     // needs far more than an SCA voice slot. The resampler then bridges fs_chan
     // to fs_audio. floor keeps fs_chan ≥ target so the channel filter is feasible.
-    const cutoff: f64 = @as(f64, @floatFromInt(bw_hz)) / 2.0;
+    const cutoff = channelCutoff(sub_hz, bw_hz);
     const fs_chan_target = @max(16_000.0, 2.5 * cutoff);
     const d2: usize = @max(1, @as(usize, @intFromFloat(@floor(fs_mpx / fs_chan_target))));
     const fs_chan = fs_mpx / @as(f64, @floatFromInt(d2));
@@ -98,7 +107,7 @@ pub fn plan(fs_iq_hz: u32, fs_audio_target: u32, bw_hz: u32) Error!RatePlan {
 const testing = std.testing;
 
 test "1.024M SCA → 16k reproduces the canonical chain as a passthrough" {
-    const p = try plan(1_024_000, 16_000, 8_000);
+    const p = try plan(1_024_000, 16_000, 67_000, 8_000);
     try testing.expectEqual(@as(usize, 2), p.d0);
     try testing.expectEqual(@as(f64, 512_000), p.fs_demod);
     try testing.expectEqual(@as(usize, 2), p.d1);
@@ -111,7 +120,7 @@ test "1.024M SCA → 16k reproduces the canonical chain as a passthrough" {
 }
 
 test "2.048M keeps fs_mpx at 256k with demod at 512k" {
-    const p = try plan(2_048_000, 16_000, 8_000);
+    const p = try plan(2_048_000, 16_000, 67_000, 8_000);
     try testing.expectEqual(@as(usize, 8), p.decimTotal());
     try testing.expectEqual(@as(f64, 256_000), p.fs_mpx);
     try testing.expectEqual(@as(f64, 512_000), p.fs_demod); // d0=4
@@ -121,7 +130,7 @@ test "2.048M keeps fs_mpx at 256k with demod at 512k" {
 }
 
 test "SCA content rate stays 16k regardless of a 48k output (3/1 upsample)" {
-    const p = try plan(1_024_000, 48_000, 8_000);
+    const p = try plan(1_024_000, 48_000, 67_000, 8_000);
     try testing.expectEqual(@as(usize, 16), p.d2);
     try testing.expectEqual(@as(f64, 16_000), p.fs_chan); // demod still at 16k
     try testing.expectEqual(@as(usize, 3), p.resamp.l);
@@ -129,8 +138,8 @@ test "SCA content rate stays 16k regardless of a 48k output (3/1 upsample)" {
     try testing.expectEqual(@as(u32, 48_000), p.fs_audio);
 }
 
-test "main mono (bw 30k) gets a content rate that carries 15 kHz" {
-    const p = try plan(1_024_000, 48_000, 30_000);
+test "main mono (--bw 15k) gets a content rate that carries 15 kHz" {
+    const p = try plan(1_024_000, 48_000, 0, 15_000);
     try testing.expectEqual(@as(usize, 6), p.d2);
     try testing.expect(p.fs_chan / 2.0 > 15_000); // Nyquist covers full mono audio
     try testing.expectEqual(@as(usize, 9), p.resamp.l);
@@ -139,7 +148,7 @@ test "main mono (bw 30k) gets a content rate that carries 15 kHz" {
 
 test "non-divisible rate is accepted (degrades, does not reject)" {
     // 1.0M: the old chain rejected this. Now it plans cleanly.
-    const p = try plan(1_000_000, 16_000, 8_000);
+    const p = try plan(1_000_000, 16_000, 67_000, 8_000);
     try testing.expect(p.fs_mpx >= MPX_MIN);
     try testing.expect(p.fs_demod >= CARSON_BW);
     try testing.expect(p.decimTotal() >= 1);
@@ -148,5 +157,5 @@ test "non-divisible rate is accepted (degrades, does not reject)" {
 }
 
 test "rate below the MPX floor traps" {
-    try testing.expectError(error.NyquistTrap, plan(200_000, 16_000, 8_000));
+    try testing.expectError(error.NyquistTrap, plan(200_000, 16_000, 67_000, 8_000));
 }

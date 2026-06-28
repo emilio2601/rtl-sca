@@ -79,7 +79,7 @@ Key flags (run `rtl-sca` with no command for the full list):
 | `--source PATH` | explicit file source (overrides the positional) | — |
 | `--rtl-tcp H:PORT` | tune `<input>` over an `rtl_tcp` network server | — |
 | `--sub HZ` | subcarrier center (`67k`, `92k`, …); `0` = main channel | `67k` |
-| `--bw HZ` | channel bandwidth (`8k` SCA, `15k` main) | `8k` |
+| `--bw HZ` | bandwidth to recover: audio width for `--sub 0`, slot width for a subcarrier (`8k` SCA, `15k` main) | `8k` |
 | `--mod MODE` | `fm` \| `am-env` \| `am-coherent` | `fm` |
 | `--deemph TAU` | de-emphasis time constant (`120us`, `off`, …) | `150us` |
 | `--rate HZ` | RTL / recording sample rate | `1.024M` |
