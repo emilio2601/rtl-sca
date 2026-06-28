@@ -48,7 +48,12 @@ pub const Error = error{
     BadPpm,
     RadioFlagWithFile,
     MissingOutput,
+    LowTuneFreq,
 };
+
+/// Below this, a tune frequency is almost certainly a missing suffix (`89.9` parses
+/// as 89.9 Hz, not MHz) rather than a real band — no RTL-SDR use here tunes sub-MHz.
+const min_tune_hz: u32 = 1_000_000;
 
 /// Context captured during parsing for a richer error message: the option being
 /// processed and the offending token. Empty fields mean "not applicable".
@@ -134,6 +139,12 @@ pub fn parseWithDiag(args: []const [:0]const u8, diag: *Diag) Error!Options {
         o.input = if (parseFreq(t)) |hz| .{ .freq = hz } else |_| .{ .file = t };
     } else {
         return error.NoInput;
+    }
+
+    // A tune frequency below any radio band is almost always a missing suffix.
+    if (o.input == .freq and o.input.freq < min_tune_hz) {
+        diag.token = input_token.?;
+        return error.LowTuneFreq;
     }
 
     // Radio-only knobs (gain/ppm/device/remote) make no sense for a file source.
@@ -235,6 +246,7 @@ pub fn errorText(err: Error) []const u8 {
         error.BadPpm => "invalid --ppm (expected an integer)",
         error.RadioFlagWithFile => "radio-only flag (--gain/--ppm/--device/--remote) used with a file source",
         error.MissingOutput => "rec requires -o <file.wav>",
+        error.LowTuneFreq => "tune frequency too low — frequencies are in Hz; add a k/M/G suffix (e.g. 89.9M)",
     };
 }
 
@@ -254,6 +266,7 @@ pub fn reportError(w: *std.Io.Writer, err: Error, diag: Diag) std.Io.Writer.Erro
         error.BadGain => try w.print("invalid '{s}' for --gain", .{diag.token}),
         error.BadDevice => try w.print("invalid '{s}' for --device (expected an integer index)", .{diag.token}),
         error.BadPpm => try w.print("invalid '{s}' for --ppm (expected an integer)", .{diag.token}),
+        error.LowTuneFreq => try w.print("tune frequency '{s}' is too low for a radio — frequencies are in Hz; add a k/M/G suffix (e.g. 89.9M)", .{diag.token}),
         else => try w.writeAll(errorText(err)),
     }
 }
@@ -408,6 +421,15 @@ test "a bad value records the flag and offending token" {
     var d2: Diag = .{};
     try testing.expectError(error.UnknownFlag, parseWithDiag(&[_][:0]const u8{ "rtl-sca", "scan", "89.9M", "--nope" }, &d2));
     try testing.expectEqualStrings("--nope", d2.token);
+}
+
+test "a bare FM frequency without a suffix is caught as too low" {
+    var d: Diag = .{};
+    try testing.expectError(error.LowTuneFreq, parseWithDiag(&[_][:0]const u8{ "rtl-sca", "scan", "89.9" }, &d));
+    try testing.expectEqualStrings("89.9", d.token);
+    // the suffixed form parses fine, and a file source is never range-checked
+    try testing.expectEqual(@as(u32, 89_900_000), (try parse(&[_][:0]const u8{ "rtl-sca", "scan", "89.9M" })).input.freq);
+    try testing.expectEqualStrings("capture.cu8", (try parse(&[_][:0]const u8{ "rtl-sca", "scan", "capture.cu8" })).input.file);
 }
 
 test "error cases" {
