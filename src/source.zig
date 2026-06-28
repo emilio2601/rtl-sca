@@ -61,20 +61,34 @@ fn encodeCmd(cmd: u8, param: u32) [5]u8 {
     return b;
 }
 
-/// Connect to an rtl_tcp server given `host:port`. Tries a literal IP first —
+/// The upstream rtl_tcp default port; used when `--remote` omits one.
+const rtl_tcp_port: u16 = 1234;
+
+/// Connect to an rtl_tcp server given `host[:port]`. Tries a literal IP first —
 /// the fast path, and the only form that carries `[ipv6]:port` — then falls back
 /// to resolving the host as a name through the OS resolver (DNS + /etc/hosts), so
-/// `pi4:1234`, Tailscale MagicDNS names, etc. all work. This mirrors getaddrinfo's
+/// `pi4`, Tailscale MagicDNS names, etc. all work. This mirrors getaddrinfo's
 /// numeric-host-then-resolve order; std keeps the literal and name paths as
 /// separate typed entry points, so the branch (not a single helper) is the idiom.
 fn connectHostPort(io: std.Io, host_port: []const u8) !net.Stream {
     if (net.IpAddress.parseLiteral(host_port)) |addr| {
-        return addr.connect(io, .{ .mode = .stream });
+        var a = addr;
+        if (a.getPort() == 0) a.setPort(rtl_tcp_port); // bare IP -> default port
+        return a.connect(io, .{ .mode = .stream });
     } else |_| {}
-    const colon = std.mem.lastIndexOfScalar(u8, host_port, ':') orelse return error.InvalidAddress;
-    const name = try net.HostName.init(host_port[0..colon]);
-    const port = std.fmt.parseInt(u16, host_port[colon + 1 ..], 10) catch return error.InvalidPort;
-    return name.connect(io, port, .{ .mode = .stream });
+    const hp = try splitHostPort(host_port);
+    const name = try net.HostName.init(hp.host);
+    return name.connect(io, hp.port, .{ .mode = .stream });
+}
+
+/// Split `host[:port]` for the hostname path, defaulting the port to the
+/// rtl_tcp port when it's omitted.
+fn splitHostPort(s: []const u8) !struct { host: []const u8, port: u16 } {
+    if (std.mem.lastIndexOfScalar(u8, s, ':')) |colon| {
+        const port = std.fmt.parseInt(u16, s[colon + 1 ..], 10) catch return error.InvalidPort;
+        return .{ .host = s[0..colon], .port = port };
+    }
+    return .{ .host = s, .port = rtl_tcp_port };
 }
 
 /// Streams cu8 IQ from an `rtl_tcp` server. Connects, reads the 12-byte greeting,
@@ -280,6 +294,18 @@ test "encodeCmd big-endian framing" {
     // ppm round-trips through the bit-cast path
     const p = encodeCmd(CMD_FREQ_CORR, @bitCast(@as(i32, -12)));
     try testing.expectEqual(@as(i32, -12), @as(i32, @bitCast(std.mem.readInt(u32, p[1..5], .big))));
+}
+
+test "splitHostPort defaults the port to 1234 when omitted" {
+    const a = try splitHostPort("pi4");
+    try testing.expectEqualStrings("pi4", a.host);
+    try testing.expectEqual(@as(u16, 1234), a.port);
+
+    const b = try splitHostPort("pi4.local:5678");
+    try testing.expectEqualStrings("pi4.local", b.host);
+    try testing.expectEqual(@as(u16, 5678), b.port);
+
+    try testing.expectError(error.InvalidPort, splitHostPort("pi4:nope"));
 }
 
 test "detectFormat" {

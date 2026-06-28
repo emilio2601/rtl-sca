@@ -28,7 +28,7 @@ const usage =
     \\
     \\flags:
     \\  --source PATH     explicit file source (overrides the positional)
-    \\  --remote H:PORT   tune <input> over an rtl_tcp server (IP or hostname)
+    \\  --remote HOST[:PORT]  tune <input> over an rtl_tcp server (IP or hostname; port defaults to 1234)
     \\  --sub HZ          subcarrier center: 67k, 92k, ...; 0 = main channel (default 67k)
     \\  --bw HZ           bandwidth to recover: audio for --sub 0, slot for a
     \\                    subcarrier (e.g. 15k main, 8k SCA; default 8k)

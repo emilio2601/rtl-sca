@@ -247,8 +247,9 @@ Form: `rtl-sca <command> <input> [flags]`.
 Flags:
 - `--source` file path; explicit, unambiguous override of the positional (use in
   scripts, or for a file whose name looks like a frequency). Implies `FileSource`.
-- `--remote host:port` to use a network (`rtl_tcp`) source. The host is a literal IP
-  or a name resolved through the OS (DNS / `/etc/hosts` / mDNS / Tailscale).
+- `--remote host[:port]` to use a network (`rtl_tcp`) source. The host is a literal IP
+  or a name resolved through the OS (DNS, `/etc/hosts`, mDNS); the port defaults to
+  rtl_tcp's `1234`.
 - `--sub` subcarrier center (`67k`, `92k`, arbitrary Hz). Default `67k`. `--sub 0`
   selects the **main program channel** (use `--bw 15k --deemph 75us` with it).
 - `--bw` subcarrier channel bandwidth (default ~`8k`, SCA voice; `~15k` for the main
