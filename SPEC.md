@@ -1,12 +1,16 @@
-# rtl-sca — Build Spec
+# rtl-sca — Design Notes
+
+> **Status:** this started as the build spec / source of truth and is now the
+> original design doc. The project is built — **the shipped code is authoritative**
+> where the two disagree. Kept for the signal-chain background and rationale
+> (Carson bandwidth, de-emphasis, the MPX layout, the rate chain), which the code
+> doesn't spell out. The phase plan below is historical.
 
 A command-line tool to detect, demodulate, and play back FM broadcast
 subcarriers (SCA and related) from an RTL-SDR. Written in **Zig**.
 
-This document is the source of truth for the project. Build it in the phases
-described below. Do not skip the file-source-first workflow — the entire DSP
-chain must be developed and validated against recorded IQ before touching live
-hardware.
+The file-source-first workflow it describes still holds: develop and validate the
+DSP against recorded IQ before touching live hardware.
 
 ---
 

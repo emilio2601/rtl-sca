@@ -9,8 +9,6 @@ the composite MPX baseband often hides narrowband audio subcarriers — commonly
 broadcasts). `rtl-sca` recovers the FM main carrier, reaches into a chosen subcarrier
 slot, demodulates it (FM or AM), and plays it back or writes a WAV.
 
-See [`SPEC.md`](SPEC.md) for the full signal-chain design and background.
-
 ## What it does
 
 - **`scan`** surveys a station's MPX baseband — pilot, subcarrier slots, modulation
@@ -107,7 +105,9 @@ watch for drops or underruns during a long capture.
 
 - `src/main.zig` — entry point; wires the CLI to the pipeline.
 - `src/cli.zig` — argument and subcommand parsing.
-- `SPEC.md` — the design and signal-chain reference.
+- [`SPEC.md`](SPEC.md) — original design notes & signal-chain reference (Carson
+  bandwidth, de-emphasis, the rate chain). The shipped code is now authoritative;
+  kept for DSP background and rationale.
 - `CLAUDE.md` — conventions for working in this repo (incl. Zig 0.16 notes).
 
 ## License

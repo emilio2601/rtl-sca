@@ -1,7 +1,9 @@
 # CLAUDE.md — rtl-sca
 
-FM SCA subcarrier decoder in Zig. **`SPEC.md` is the source of truth** for what to
-build and in what order (Phases 1–5). This file covers how to work in the repo.
+FM SCA subcarrier decoder in Zig. The project is built — **the code is
+authoritative**. `SPEC.md` is the original design doc, kept for signal-chain
+background (Carson bandwidth, de-emphasis, the rate chain), not as a build plan;
+its Phases 1–5 are historical. This file covers how to work in the repo.
 
 ## Toolchain
 
