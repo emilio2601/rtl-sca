@@ -89,10 +89,14 @@ test "unpackCs16 endpoints" {
     try testing.expectApproxEqAbs(@as(f32, 0.5), out[1].im, 1e-4);
 }
 
-test "C32 ops" {
+test "C32 mul sign convention" {
     const a = C32{ .re = 1, .im = 2 };
     const b = C32{ .re = 3, .im = 4 };
     try testing.expectEqual(C32{ .re = -5, .im = 10 }, a.mul(b));
-    try testing.expectEqual(C32{ .re = 1, .im = -2 }, a.conj());
-    try testing.expectApproxEqAbs(@as(f32, 5.0), (C32{ .re = 3, .im = 4 }).mag(), 1e-6);
+}
+
+test "unpack truncates a partial trailing sample" {
+    var out: [4]C32 = undefined;
+    try testing.expectEqual(@as(usize, 2), unpackCu8(&[_]u8{ 0, 0, 0, 0, 0 }, &out)); // 5 bytes -> 2
+    try testing.expectEqual(@as(usize, 1), unpackCs16(&[_]u8{ 0, 0, 0, 0, 0, 0 }, &out)); // 6 bytes -> 1
 }

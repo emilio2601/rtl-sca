@@ -161,6 +161,19 @@ pub fn build(comptime Elem: type, a: std.mem.Allocator, fs_in: f64, cutoff: f64,
 
 const testing = std.testing;
 
+test "tapCount is forced odd (Type-I linear phase)" {
+    try testing.expect(tapCount(256_000, 1_000) % 2 == 1);
+    // nf == 4 (even) must bump to the next odd count
+    try testing.expectEqual(@as(usize, 5), tapCount(1_000, 825));
+}
+
+test "build rejects bad bandwidth and over-sharp filters" {
+    const a = testing.allocator;
+    try testing.expectError(error.BadBandwidth, build(f32, a, 256_000, 0, 4)); // cutoff <= 0
+    try testing.expectError(error.BadBandwidth, build(f32, a, 256_000, 32_000, 4)); // transition == 0
+    try testing.expectError(error.FilterTooSharp, build(f32, a, 256_000, 127_990, 1)); // tapCount > max_taps
+}
+
 fn gainAtReal(taps: []const f32, fs: f64, f: f64) f32 {
     const ring = testing.allocator.alloc(f32, 2 * taps.len) catch unreachable;
     defer testing.allocator.free(ring);

@@ -106,6 +106,23 @@ pub fn plan(fs_iq_hz: u32, fs_audio_target: u32, sub_hz: u32, bw_hz: u32) Error!
 
 const testing = std.testing;
 
+test "channelCutoff hides the real/complex factor of 2" {
+    try testing.expectEqual(@as(f64, 15_000), channelCutoff(0, 15_000)); // main: cut at bw
+    try testing.expectEqual(@as(f64, 4_000), channelCutoff(67_000, 8_000)); // sub: ±bw/2
+}
+
+test "d0 is clamped to keep the demod rate >= Carson bandwidth" {
+    // 1.92M: d_total=8 alone drops fs_demod to 240k (< CARSON_BW), so d0 caps at 4.
+    const p = try plan(1_920_000, 48_000, 67_000, 8_000);
+    try testing.expectEqual(@as(usize, 4), p.d0);
+    try testing.expectEqual(@as(usize, 2), p.d1);
+    try testing.expectEqual(@as(f64, 480_000), p.fs_demod);
+    try testing.expect(p.fs_demod >= CARSON_BW);
+    try testing.expectEqual(@as(f64, 240_000), p.fs_mpx);
+    try testing.expect(p.fs_mpx >= MPX_MIN);
+    try testing.expectEqual(@as(usize, 8), p.decimTotal());
+}
+
 test "1.024M SCA → 16k reproduces the canonical chain as a passthrough" {
     const p = try plan(1_024_000, 16_000, 67_000, 8_000);
     try testing.expectEqual(@as(usize, 2), p.d0);

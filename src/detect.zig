@@ -347,6 +347,31 @@ fn guessFor(center_hz: f64, mod: Modulation) []const u8 {
 // ── tests ──
 const testing = std.testing;
 
+test "carrierDb is NaN when the slot shoulders fall off-band" {
+    var welch = try Welch.init(testing.allocator, 64);
+    defer welch.deinit(testing.allocator);
+    const psd = [_]f64{1.0} ** 33; // n/2+1 bins
+    // at this tiny bw the ±0.3·bw shoulder rounds to bin 0 -> no usable measurement
+    try testing.expect(std.math.isNan(carrierDb(&psd, &welch, 64.0, 10.0, 1.0)));
+}
+
+test "powerCentroid is the power-weighted bin center" {
+    var welch = try Welch.init(testing.allocator, 64);
+    defer welch.deinit(testing.allocator);
+    var psd = [_]f64{0.0} ** 33;
+    psd[10] = 1.0;
+    psd[20] = 3.0;
+    // fs == n so binHz(i) == i; centroid = (10·1 + 20·3) / 4 = 17.5
+    try testing.expectApproxEqAbs(@as(f64, 17.5), powerCentroid(&psd, 0, 32, &welch, 64.0), 1e-9);
+}
+
+test "percentileDb sorts then picks the quantile element" {
+    const a = [_]f64{ 30, 10, 50, 20, 40 };
+    try testing.expectEqual(@as(f64, 10), percentileDb(&a, 0, 4, 0.0));
+    try testing.expectEqual(@as(f64, 30), percentileDb(&a, 0, 4, 0.5));
+    try testing.expectEqual(@as(f64, 50), percentileDb(&a, 0, 4, 1.0));
+}
+
 test "scan detects pilot + classifies an FM SCA and a DSB slot" {
     const fs = 256_000.0;
     const N = 1_000_000; // ~4 s
