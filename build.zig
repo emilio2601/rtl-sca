@@ -11,6 +11,12 @@ pub fn build(b: *std.Build) void {
         .link_libc = true,
     });
 
+    // Single source of truth for the version: build.zig.zon, exposed to the code
+    // as `@import("build_options").version` (for `--version`).
+    const build_options = b.addOptions();
+    build_options.addOption([]const u8, "version", @import("build.zig.zon").version);
+    root_mod.addOptions("build_options", build_options);
+
     // Audio: a small C shim over miniaudio (fetched via build.zig.zon, not vendored).
     // Zig sees only the clean shim API — translate-c on the shim header, never
     // miniaudio.h's nested anonymous structs.

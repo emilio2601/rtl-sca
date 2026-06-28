@@ -10,6 +10,7 @@ const frontend_mod = @import("frontend.zig");
 const rateplan = @import("rateplan.zig");
 const detect = @import("detect.zig");
 const complex = @import("complex.zig");
+const build_options = @import("build_options");
 
 const usage =
     \\rtl-sca — FM SCA subcarrier decoder
@@ -48,6 +49,7 @@ const usage =
     \\                      -v   rate plan, plus at-exit health + signal lines for
     \\                           play/rec; per-slot classifier metrics for scan
     \\                      -vv  also log the health + signal lines live (~every 2s)
+    \\  -V, --version     print the version and exit
     \\
     \\examples:
     \\  rtl-sca scan 89.9M
@@ -66,6 +68,16 @@ pub fn main(init: std.process.Init) !void {
     var fw: Io.File.Writer = .init(.stderr(), init.io, &buf);
     const w = &fw.interface;
     defer w.flush() catch {};
+
+    for (args[1..]) |a| {
+        if (std.mem.eql(u8, a, "--version") or std.mem.eql(u8, a, "-V")) {
+            var vbuf: [64]u8 = undefined;
+            var vfw: Io.File.Writer = .init(.stdout(), init.io, &vbuf);
+            try vfw.interface.print("rtl-sca {s}\n", .{build_options.version});
+            try vfw.interface.flush();
+            return;
+        }
+    }
 
     var diag: cli.Diag = .{};
     const opts = cli.parseWithDiag(args, &diag) catch |err| {
