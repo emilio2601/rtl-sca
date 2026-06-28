@@ -43,8 +43,11 @@ const usage =
     \\  --gain DB         tuner gain (default auto)
     \\  --device N        USB dongle index (default 0)
     \\  --ppm N           crystal frequency correction, ppm (default 0)
-    \\  -o FILE           output WAV path (rec)
-    \\  -v                verbose: show per-slot classifier metrics (scan)
+    \\  -o FILE           output WAV path (rec); - streams the WAV to stdout
+    \\  -v, -vv           diagnostics to stderr:
+    \\                      -v   rate plan, plus at-exit health + signal lines for
+    \\                           play/rec; per-slot classifier metrics for scan
+    \\                      -vv  also log the health + signal lines live (~every 2s)
     \\
     \\examples:
     \\  rtl-sca scan 89.9M
