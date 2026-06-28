@@ -83,11 +83,12 @@ pub fn main(init: std.process.Init) !void {
 
 fn runRec(init: std.process.Init, w: *Io.Writer, opts: cli.Options) !void {
     const out_path = opts.out.?; // cli.parse guarantees rec has -o
+    const dest = if (std.mem.eql(u8, out_path, "-")) "stdout" else out_path;
 
     var p: pipeline.Pipeline = undefined;
     p.init(init.gpa, opts) catch |err| reportInit(w, err);
     defer p.deinit();
-    try printSummary(w, opts, out_path);
+    try printSummary(w, opts, dest);
     if (opts.verbose > 0) try printRatePlan(w, p.plan, true);
     try w.flush();
 
@@ -98,7 +99,7 @@ fn runRec(init: std.process.Init, w: *Io.Writer, opts: cli.Options) !void {
     var running = Running.init(true);
     installSigint(&running); // Ctrl-C finalizes a live recording cleanly
     driveSource(&p, init, w, opts, .{ .wav = &wsink }, &running) catch |err| reportRun(w, err);
-    try w.print("wrote {s}\n", .{out_path});
+    try w.print("wrote {s}\n", .{dest});
 }
 
 fn runPlay(init: std.process.Init, w: *Io.Writer, opts: cli.Options) !void {
@@ -181,6 +182,13 @@ fn runScan(init: std.process.Init, w: *Io.Writer, opts: cli.Options) !void {
     defer arena.deinit();
     const a = arena.allocator();
 
+    // The results table is the command's output → stdout (pipeable/redirectable);
+    // the rate plan and USB stats are diagnostics and stay on stderr (`w`).
+    var obuf: [4096]u8 = undefined;
+    var ofw: Io.File.Writer = .init(.stdout(), io, &obuf);
+    const out = &ofw.interface;
+    defer out.flush() catch {};
+
     const max_iq = scan_read_bytes / 2;
     const plan = rateplan.plan(opts.rate_hz, opts.audio_rate_hz orelse 48_000, opts.sub_hz, opts.bw_hz) catch |err| reportInit(w, err);
     var fe = frontend_mod.Frontend.init(a, plan, max_iq) catch |err| reportInit(w, err);
@@ -232,7 +240,7 @@ fn runScan(init: std.process.Init, w: *Io.Writer, opts: cli.Options) !void {
 
     var res = detect.scan(init.gpa, mpx[0..filled], .{ .fs_mpx = fe.fs_mpx }) catch |err| reportRun(w, err);
     defer res.deinit();
-    try printScan(w, res, opts.verbose);
+    try printScan(out, res, opts.verbose);
 }
 
 fn printScan(w: *Io.Writer, res: detect.ScanResult, verbose: u8) !void {

@@ -5,30 +5,38 @@ const Running = @import("ring.zig").Running;
 
 extern fn usleep(usecs: c_uint) c_int; // libc; backpressure pacing for the producer
 
-/// Writes a canonical 16-bit PCM mono WAV. The 44-byte header is written up front
-/// with placeholder sizes; `finish` seeks back and patches the RIFF and data sizes.
+/// Writes a canonical 16-bit PCM mono WAV. For a real file the 44-byte header is
+/// written with placeholder sizes that `finish` seeks back and patches. The path
+/// `-` writes to stdout: a pipe isn't seekable, so the sizes are advertised as
+/// unknown (0xFFFFFFFF) up front and never patched — players read to EOF.
 /// Constructed in place (the File.Writer must keep a stable address).
 pub const WavSink = struct {
     file: std.Io.File,
     fw: std.Io.File.Writer,
     sample_rate: u32,
     frames: u32 = 0,
+    streaming: bool = false, // non-seekable output (stdout): can't back-patch sizes
 
     pub fn init(self: *WavSink, io: std.Io, path: []const u8, wbuf: []u8, sample_rate: u32) !void {
+        const to_stdout = std.mem.eql(u8, path, "-");
         self.* = .{
-            .file = try std.Io.Dir.cwd().createFile(io, path, .{}),
+            .file = if (to_stdout) std.Io.File.stdout() else try std.Io.Dir.cwd().createFile(io, path, .{}),
             .fw = undefined,
             .sample_rate = sample_rate,
             .frames = 0,
+            .streaming = to_stdout,
         };
         self.fw = self.file.writer(io, wbuf);
-        try self.writeHeader(0);
+        try self.writeHeader();
     }
 
-    fn writeHeader(self: *WavSink, data_bytes: u32) !void {
+    fn writeHeader(self: *WavSink) !void {
         const w = &self.fw.interface;
+        // Real file: 0 now, patched in finish(). Stdout: 0xFFFFFFFF (unknown length).
+        const data_bytes: u32 = if (self.streaming) 0xFFFF_FFFF else 0;
+        const riff_bytes: u32 = if (self.streaming) 0xFFFF_FFFF else 36;
         try w.writeAll("RIFF");
-        try w.writeInt(u32, 36 + data_bytes, .little);
+        try w.writeInt(u32, riff_bytes, .little);
         try w.writeAll("WAVE");
         try w.writeAll("fmt ");
         try w.writeInt(u32, 16, .little); // PCM fmt chunk size
@@ -52,13 +60,15 @@ pub const WavSink = struct {
     }
 
     pub fn finish(self: *WavSink, io: std.Io) !void {
-        const data_bytes = self.frames * 2;
-        try self.fw.seekTo(4);
-        try self.fw.interface.writeInt(u32, 36 + data_bytes, .little);
-        try self.fw.seekTo(40);
-        try self.fw.interface.writeInt(u32, data_bytes, .little);
+        if (!self.streaming) {
+            const data_bytes = self.frames * 2;
+            try self.fw.seekTo(4);
+            try self.fw.interface.writeInt(u32, 36 + data_bytes, .little);
+            try self.fw.seekTo(40);
+            try self.fw.interface.writeInt(u32, data_bytes, .little);
+        }
         try self.fw.interface.flush();
-        self.file.close(io);
+        if (!self.streaming) self.file.close(io); // leave stdout open for the shell
     }
 };
 
