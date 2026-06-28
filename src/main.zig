@@ -97,11 +97,11 @@ fn runRec(init: std.process.Init, w: *Io.Writer, opts: cli.Options) !void {
 
     var wsink: sink_mod.WavSink = undefined;
     var wbuf: [1 << 16]u8 = undefined;
-    wsink.init(init.io, out_path, &wbuf, p.fs_audio) catch |err| reportRun(w, err);
+    wsink.init(init.io, out_path, &wbuf, p.fs_audio) catch |err| reportRun(w, err, opts);
 
     var running = Running.init(true);
     installSigint(&running); // Ctrl-C finalizes a live recording cleanly
-    driveSource(&p, init, w, opts, .{ .wav = &wsink }, &running) catch |err| reportRun(w, err);
+    driveSource(&p, init, w, opts, .{ .wav = &wsink }, &running) catch |err| reportRun(w, err, opts);
     try w.print("wrote {s}\n", .{dest});
 }
 
@@ -125,10 +125,10 @@ fn runPlay(init: std.process.Init, w: *Io.Writer, opts: cli.Options) !void {
     var ring = ring_mod.Ring.init(&ring_buf);
     var running = Running.init(true);
     var asink: sink_mod.AudioSink = undefined;
-    asink.init(&ring, &running, p.fs_audio) catch |err| reportRun(w, err);
+    asink.init(&ring, &running, p.fs_audio) catch |err| reportRun(w, err, opts);
     installSigint(&running);
 
-    driveSource(&p, init, w, opts, .{ .audio = &asink }, &running) catch |err| reportRun(w, err);
+    driveSource(&p, init, w, opts, .{ .audio = &asink }, &running) catch |err| reportRun(w, err, opts);
 }
 
 /// Open the source selected by `opts` into caller-owned storage (file or rtl_tcp),
@@ -213,12 +213,12 @@ fn runScan(init: std.process.Init, w: *Io.Writer, opts: cli.Options) !void {
     var fsrc: source_mod.FileSource = undefined;
     var rsrc: source_mod.RtlTcpSource = undefined;
     var usrc: source_mod.UsbSource = undefined;
-    const source = openSource(io, init.gpa, opts, &running, &fsrc, &rsrc, &usrc, reader_buf) catch |err| reportRun(w, err);
+    const source = openSource(io, init.gpa, opts, &running, &fsrc, &rsrc, &usrc, reader_buf) catch |err| reportRun(w, err, opts);
     defer source.close(io);
 
     var filled: usize = 0;
     while (running.load(.monotonic) and filled < cap) {
-        const nb = source.read(block) catch |err| reportRun(w, err);
+        const nb = source.read(block) catch |err| reportRun(w, err, opts);
         if (nb == 0) break;
         const niq = switch (source.format()) {
             .cu8 => complex.unpackCu8(block[0..nb], iq),
@@ -241,7 +241,7 @@ fn runScan(init: std.process.Init, w: *Io.Writer, opts: cli.Options) !void {
         try w.flush();
     };
 
-    var res = detect.scan(init.gpa, mpx[0..filled], .{ .fs_mpx = fe.fs_mpx }) catch |err| reportRun(w, err);
+    var res = detect.scan(init.gpa, mpx[0..filled], .{ .fs_mpx = fe.fs_mpx }) catch |err| reportRun(w, err, opts);
     defer res.deinit();
     try printScan(out, res, opts.verbose);
 }
@@ -303,19 +303,44 @@ fn reportInit(w: *Io.Writer, err: pipeline.InitError) noreturn {
     std.process.exit(1);
 }
 
-fn reportRun(w: *Io.Writer, err: anyerror) noreturn {
-    const msg: []const u8 = switch (err) {
-        error.RtlTcpNeedsFreq => "--remote needs a frequency as the input, not a file",
-        error.AudioInit, error.AudioStart => "could not open the audio output device",
-        error.UsbOpen => "could not open the RTL-SDR (is it plugged in? try --device N)",
-        error.UsbConfig => "could not configure the RTL-SDR (sample rate / freq / gain)",
-        error.UsbRead => "RTL-SDR read failed (device unplugged?)",
-        error.UsbThread => "could not start the RTL-SDR reader thread",
-        else => @errorName(err),
-    };
-    w.print("rtl-sca: {s}\n", .{msg}) catch {};
+/// Facts-only runtime error report: the operation that failed and the concrete
+/// identifier (host:port / file / device). No cause-guessing, no remedies.
+fn reportRun(w: *Io.Writer, err: anyerror, opts: cli.Options) noreturn {
+    const remote = opts.remote orelse "";
+    w.writeAll("rtl-sca: ") catch {};
+    (switch (err) {
+        error.RtlTcpNeedsFreq => w.writeAll("--remote needs a frequency as the input, not a file"),
+        error.AudioInit, error.AudioStart => w.writeAll("could not open the audio output device"),
+        error.UsbThread => w.writeAll("could not start the RTL-SDR reader thread"),
+        error.UsbOpen => w.print("could not open RTL-SDR device {d}", .{opts.device}),
+        error.UsbConfig => w.print("could not configure RTL-SDR device {d} (rate/freq/gain)", .{opts.device}),
+        error.UsbRead => w.print("RTL-SDR read failed (device {d})", .{opts.device}),
+        error.ReadFailed => if (opts.remote) |r|
+            w.print("lost the rtl_tcp stream from {s}", .{r})
+        else
+            w.print("read error: {s}", .{inputPath(opts)}),
+        error.ConnectionRefused => w.print("connection refused: {s}", .{remote}),
+        error.ConnectionResetByPeer => w.print("connection reset: {s}", .{remote}),
+        error.ConnectionTimedOut => w.print("connection timed out: {s}", .{remote}),
+        error.NetworkUnreachable => w.print("network unreachable: {s}", .{remote}),
+        error.UnknownHostName => w.print("could not resolve host: {s}", .{remote}),
+        error.InvalidAddress, error.InvalidPort, error.InvalidHostName => w.print("invalid --remote address: {s}", .{remote}),
+        error.FileNotFound => w.print("input file not found: {s}", .{inputPath(opts)}),
+        error.AccessDenied => w.print("permission denied: {s}", .{inputPath(opts)}),
+        error.WriteFailed => w.print("write failed: {s}", .{opts.out orelse "output"}),
+        else => w.writeAll(@errorName(err)),
+    }) catch {};
+    w.writeAll("\n") catch {};
     w.flush() catch {};
     std.process.exit(1);
+}
+
+/// The input file path for error context, or a placeholder for a radio source.
+fn inputPath(opts: cli.Options) []const u8 {
+    return switch (opts.input) {
+        .file => |p| p,
+        .freq => "input",
+    };
 }
 
 fn pipelineErrorText(err: pipeline.InitError) []const u8 {
