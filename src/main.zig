@@ -173,7 +173,7 @@ fn driveSource(p: *pipeline.Pipeline, init: std.process.Init, w: *Io.Writer, opt
         .{ .w = w, .periodic = opts.verbose >= 2 }
     else
         null;
-    try p.run(init.io, source, sink, running, dbg);
+    try p.run(init.io, source, sink, running, w, dbg);
 }
 
 const scan_seconds = 4;

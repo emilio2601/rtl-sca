@@ -158,7 +158,7 @@ pub const Pipeline = struct {
 
     /// Pump `source` through the DSP into `sink` until the source ends (file EOF)
     /// or `running` is cleared (SIGINT for live sources), then finalize the sink.
-    pub fn run(self: *Pipeline, io: std.Io, source: Source, sink: Sink, running: *Running, dbg: ?Debug) !void {
+    pub fn run(self: *Pipeline, io: std.Io, source: Source, sink: Sink, running: *Running, w: *std.Io.Writer, dbg: ?Debug) !void {
         const fmt = source.format();
         self.metrics = .{};
         var busy_ns: u64 = 0; // wall time spent in the DSP (vs. blocked on I/O)
@@ -167,7 +167,16 @@ pub const Pipeline = struct {
         var report_at = report_every;
 
         while (running.load(.monotonic)) {
-            const nb = try source.read(self.block[0..CHUNK_BYTES]);
+            const nb = source.read(self.block[0..CHUNK_BYTES]) catch |err| {
+                // A live feed dropping after data has flowed is a clean end of
+                // stream — finalize what we have. Startup failures (in_samples==0)
+                // and file read errors still propagate as real errors.
+                if (source.isLive() and in_samples > 0) {
+                    try w.print("rtl-sca: input stream ended after {d:.0}s\n", .{@as(f64, @floatFromInt(in_samples)) / self.plan.fs_iq});
+                    break;
+                }
+                return err;
+            };
             if (nb == 0) break; // EOF (file source)
             const niq = self.unpack(fmt, self.block[0..nb]);
             if (dbg != null) self.accInput(self.iq[0..niq]); // before t0: not counted as DSP time

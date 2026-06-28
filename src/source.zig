@@ -262,6 +262,12 @@ pub const Source = union(enum) {
             .usb => |u| u.read(bytes),
         };
     }
+    /// A live feed (radio/network) that can drop mid-stream, vs. a file that
+    /// ends only at EOF. A mid-stream read failure on a live source is a clean
+    /// end-of-stream, not a fatal error (see Pipeline.run).
+    pub fn isLive(self: Source) bool {
+        return self != .file;
+    }
     pub fn format(self: Source) Format {
         return switch (self) {
             .file => |f| f.format,
