@@ -22,6 +22,15 @@ const READ_BYTES: usize = 1 << 18; // 256 KiB; sizes the one-shot DSP buffers
 // ~32 ms at 1.024 Msps. Bounded by READ_BYTES (the buffer capacity).
 const CHUNK_BYTES: usize = 1 << 16;
 
+// The first ~180 ms after a live (re)tune is front-end overload while the tuner
+// PLL and gain settle — the discriminator outputs ±π garbage (measured: input
+// clip 60%→0 over ~180 ms). Drop the output for a margin past that, rather than
+// record/play the settling garbage; the filters still run, so they stay warm. No
+// added latency, and live sources only (a file has no tuner transient). The
+// input-clip metric still surfaces the overload, and a *later* overload — a real
+// gain problem — is left audible.
+const STARTUP_SKIP_S: f64 = 0.3;
+
 pub const InitError = error{SubcarrierAboveNyquist} || frontend_mod.Error || rateplan.Error;
 
 /// Signal-quality counters for the `-v`/`-vv` readout — input/output peak level
@@ -165,6 +174,7 @@ pub const Pipeline = struct {
         var in_samples: u64 = 0;
         const report_every: u64 = @intFromFloat(2.0 * self.plan.fs_iq);
         var report_at = report_every;
+        const skip_until: u64 = if (source.isLive()) @intFromFloat(STARTUP_SKIP_S * self.plan.fs_iq) else 0;
 
         while (running.load(.monotonic)) {
             const nb = source.read(self.block[0..CHUNK_BYTES]) catch |err| {
@@ -184,8 +194,12 @@ pub const Pipeline = struct {
             const na = self.processIq(self.iq[0..niq]);
             for (self.audio[0..na]) |*s| s.* *= self.audio_gain;
             busy_ns += @intCast(t0.durationTo(std.Io.Clock.awake.now(io)).nanoseconds);
-            if (dbg != null) self.accOutput(self.audio[0..na]);
-            try sink.writeAudio(self.audio[0..na]);
+            // Drop the live tune-in transient: don't record/play the settling
+            // garbage. The filters above still ran, so they stay warm.
+            if (in_samples >= skip_until) {
+                if (dbg != null) self.accOutput(self.audio[0..na]);
+                try sink.writeAudio(self.audio[0..na]);
+            }
 
             in_samples += niq;
             if (dbg) |d| if (d.periodic and in_samples >= report_at) {
