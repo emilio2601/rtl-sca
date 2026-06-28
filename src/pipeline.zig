@@ -211,12 +211,12 @@ pub const Pipeline = struct {
         // and output level/clip — the "is the signal good" view (vs. plumbing above).
         const m = self.metrics;
         if (m.in_n > 0) {
-            try w.print("signal  : in {d:.1} dBFS, clip {d:.2}%", .{ dbfs(m.in_peak), inClipPct(m) });
+            try w.print("signal  : in {d:.1} dBFS, clip {d:.2}%", .{ dbfs(m.in_peak), clipPct(m.in_clip, m.in_n) });
             if (self.sub.demodStats()) |ds| {
                 const df = @as(f64, ds.freq) * self.plan.fs_chan / (2.0 * std.math.pi);
                 try w.print(" | lock {d:.2}, Δf {d:.0} Hz", .{ ds.lock, df });
             }
-            if (m.out_n > 0) try w.print(" | out {d:.1} dBFS, clip {d}", .{ dbfs(m.out_peak), m.out_clip });
+            if (m.out_n > 0) try w.print(" | out {d:.1} dBFS, clip {d:.2}%", .{ dbfs(m.out_peak), clipPct(m.out_clip, m.out_n) });
             try w.writeAll("\n");
         }
         try w.flush();
@@ -227,8 +227,8 @@ fn dbfs(peak: f32) f64 {
     return 20.0 * std.math.log10(@as(f64, peak) + 1e-9);
 }
 
-fn inClipPct(m: Metrics) f64 {
-    return 100.0 * @as(f64, @floatFromInt(m.in_clip)) / @as(f64, @floatFromInt(m.in_n));
+fn clipPct(clip: u64, n: u64) f64 {
+    return 100.0 * @as(f64, @floatFromInt(clip)) / @as(f64, @floatFromInt(n));
 }
 
 // ── tests ──
