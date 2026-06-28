@@ -61,8 +61,11 @@ pub fn main(init: std.process.Init) !void {
     const w = &fw.interface;
     defer w.flush() catch {};
 
-    const opts = cli.parse(args) catch |err| {
-        try w.print("rtl-sca: {s}\n\n", .{cli.errorText(err)});
+    var diag: cli.Diag = .{};
+    const opts = cli.parseWithDiag(args, &diag) catch |err| {
+        try w.writeAll("rtl-sca: ");
+        try cli.reportError(w, err, diag);
+        try w.writeAll("\n\n");
         try w.writeAll(usage);
         try w.flush();
         std.process.exit(2);

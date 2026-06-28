@@ -50,8 +50,22 @@ pub const Error = error{
     MissingOutput,
 };
 
+/// Context captured during parsing for a richer error message: the option being
+/// processed and the offending token. Empty fields mean "not applicable".
+pub const Diag = struct {
+    flag: []const u8 = "",
+    token: []const u8 = "",
+};
+
 /// Parse the full argv (args[0] is the program name).
 pub fn parse(args: []const [:0]const u8) Error!Options {
+    var diag: Diag = .{};
+    return parseWithDiag(args, &diag);
+}
+
+/// Like `parse`, but records the offending option/token into `diag` on error so
+/// the caller can print a contextual message (see `reportError`).
+pub fn parseWithDiag(args: []const [:0]const u8, diag: *Diag) Error!Options {
     if (args.len < 2) return error.NoCommand;
     const command = std.meta.stringToEnum(Command, args[1]) orelse return error.UnknownCommand;
 
@@ -71,38 +85,40 @@ pub fn parse(args: []const [:0]const u8) Error!Options {
                 name = tok[0..eq];
                 inline_val = tok[eq + 1 ..];
             }
+            diag.flag = name;
 
             if (verboseCount(name)) |n| {
                 o.verbose +|= n; // saturating: -v, -vv, ... and --verbose all add up
             } else if (std.mem.eql(u8, name, "--source")) {
-                source_path = try value(args, &i, inline_val);
+                source_path = try value(args, &i, inline_val, diag);
             } else if (std.mem.eql(u8, name, "--remote")) {
-                o.remote = try value(args, &i, inline_val);
+                o.remote = try value(args, &i, inline_val, diag);
                 radio_flag = name;
             } else if (std.mem.eql(u8, name, "--sub")) {
-                o.sub_hz = try parseFreq(try value(args, &i, inline_val));
+                o.sub_hz = try parseFreq(try value(args, &i, inline_val, diag));
             } else if (std.mem.eql(u8, name, "--bw")) {
-                o.bw_hz = try parseFreq(try value(args, &i, inline_val));
+                o.bw_hz = try parseFreq(try value(args, &i, inline_val, diag));
             } else if (std.mem.eql(u8, name, "--rate")) {
-                o.rate_hz = try parseFreq(try value(args, &i, inline_val));
+                o.rate_hz = try parseFreq(try value(args, &i, inline_val, diag));
             } else if (std.mem.eql(u8, name, "--audio-rate")) {
-                o.audio_rate_hz = try parseFreq(try value(args, &i, inline_val));
+                o.audio_rate_hz = try parseFreq(try value(args, &i, inline_val, diag));
             } else if (std.mem.eql(u8, name, "--mod")) {
-                o.mod = parseMod(try value(args, &i, inline_val)) orelse return error.BadMod;
+                o.mod = parseMod(try value(args, &i, inline_val, diag)) orelse return error.BadMod;
             } else if (std.mem.eql(u8, name, "--deemph")) {
-                o.deemph_us = parseDeemph(try value(args, &i, inline_val)) catch return error.BadDeemph;
+                o.deemph_us = parseDeemph(try value(args, &i, inline_val, diag)) catch return error.BadDeemph;
             } else if (std.mem.eql(u8, name, "--gain")) {
-                o.gain = std.fmt.parseFloat(f32, try value(args, &i, inline_val)) catch return error.BadGain;
+                o.gain = std.fmt.parseFloat(f32, try value(args, &i, inline_val, diag)) catch return error.BadGain;
                 radio_flag = name;
             } else if (std.mem.eql(u8, name, "--device")) {
-                o.device = std.fmt.parseInt(u32, try value(args, &i, inline_val), 10) catch return error.BadDevice;
+                o.device = std.fmt.parseInt(u32, try value(args, &i, inline_val, diag), 10) catch return error.BadDevice;
                 radio_flag = name;
             } else if (std.mem.eql(u8, name, "--ppm")) {
-                o.ppm = std.fmt.parseInt(i32, try value(args, &i, inline_val), 10) catch return error.BadPpm;
+                o.ppm = std.fmt.parseInt(i32, try value(args, &i, inline_val, diag), 10) catch return error.BadPpm;
                 radio_flag = name;
             } else if (std.mem.eql(u8, name, "-o")) {
-                o.out = try value(args, &i, inline_val);
+                o.out = try value(args, &i, inline_val, diag);
             } else {
+                diag.token = name;
                 return error.UnknownFlag;
             }
         } else {
@@ -120,7 +136,7 @@ pub fn parse(args: []const [:0]const u8) Error!Options {
         return error.NoInput;
     }
 
-    // Radio-only knobs (gain/ppm/device/rtl-tcp) make no sense for a file source.
+    // Radio-only knobs (gain/ppm/device/remote) make no sense for a file source.
     if (o.input == .file and radio_flag != null) return error.RadioFlagWithFile;
 
     if (command == .rec and o.out == null) return error.MissingOutput;
@@ -138,11 +154,29 @@ fn verboseCount(name: []const u8) ?u8 {
     return null;
 }
 
+/// A token that begins a new option rather than a value: starts with `-` and is
+/// not a negative number (so `--bw`/`-v` are flags, but `-12`/`-0.5` are values).
+fn looksLikeFlag(s: []const u8) bool {
+    return s.len >= 2 and s[0] == '-' and !(std.ascii.isDigit(s[1]) or s[1] == '.');
+}
+
 /// Consume a flag's value: inline (`--flag=v`) if present, else the next token.
-fn value(args: []const [:0]const u8, i: *usize, inline_val: ?[]const u8) Error![]const u8 {
-    if (inline_val) |v| return v;
+/// A following token that looks like another option is rejected as a missing
+/// value rather than silently swallowed (so `--sub --bw 15k` reports that `--sub`
+/// needs a value, not "invalid frequency").
+fn value(args: []const [:0]const u8, i: *usize, inline_val: ?[]const u8, diag: *Diag) Error![]const u8 {
+    if (inline_val) |v| {
+        diag.token = v;
+        return v;
+    }
     if (i.* + 1 >= args.len) return error.MissingValue;
+    const next = args[i.* + 1];
+    if (looksLikeFlag(next)) {
+        diag.token = next;
+        return error.MissingValue;
+    }
     i.* += 1;
+    diag.token = args[i.*];
     return args[i.*];
 }
 
@@ -202,6 +236,26 @@ pub fn errorText(err: Error) []const u8 {
         error.RadioFlagWithFile => "radio-only flag (--gain/--ppm/--device/--remote) used with a file source",
         error.MissingOutput => "rec requires -o <file.wav>",
     };
+}
+
+/// Write a one-line error message (no trailing newline), naming the offending
+/// option and token from `diag` where it adds clarity. Falls back to the static
+/// `errorText` for errors without per-flag context.
+pub fn reportError(w: *std.Io.Writer, err: Error, diag: Diag) std.Io.Writer.Error!void {
+    switch (err) {
+        error.MissingValue => if (diag.token.len > 0)
+            try w.print("option '{s}' needs a value, but found '{s}'", .{ diag.flag, diag.token })
+        else
+            try w.print("option '{s}' needs a value", .{diag.flag}),
+        error.UnknownFlag => try w.print("unknown flag '{s}'", .{diag.token}),
+        error.BadFreq => try w.print("invalid frequency '{s}' for '{s}'", .{ diag.token, diag.flag }),
+        error.BadMod => try w.print("invalid '{s}' for --mod (expected fm, am-env, am-coherent)", .{diag.token}),
+        error.BadDeemph => try w.print("invalid '{s}' for --deemph (expected a time constant like 120us, or off)", .{diag.token}),
+        error.BadGain => try w.print("invalid '{s}' for --gain", .{diag.token}),
+        error.BadDevice => try w.print("invalid '{s}' for --device (expected an integer index)", .{diag.token}),
+        error.BadPpm => try w.print("invalid '{s}' for --ppm (expected an integer)", .{diag.token}),
+        else => try w.writeAll(errorText(err)),
+    }
 }
 
 const testing = std.testing;
@@ -330,6 +384,30 @@ test "rec requires output and accepts -o" {
 
     const missing = [_][:0]const u8{ "rtl-sca", "rec", "89.9M" };
     try testing.expectError(error.MissingOutput, parse(&missing));
+}
+
+test "a flag does not swallow a following option as its value" {
+    // `--sub --bw 15k`: --sub has no value -> MissingValue (not BadFreq on '--bw').
+    var diag: Diag = .{};
+    try testing.expectError(error.MissingValue, parseWithDiag(&[_][:0]const u8{ "rtl-sca", "play", "89.9M", "--sub", "--bw", "15k" }, &diag));
+    try testing.expectEqualStrings("--sub", diag.flag);
+    try testing.expectEqualStrings("--bw", diag.token);
+}
+
+test "negative numbers are values, not flags" {
+    const o = try parse(&[_][:0]const u8{ "rtl-sca", "play", "89.9M", "--ppm", "-12" });
+    try testing.expectEqual(@as(i32, -12), o.ppm);
+}
+
+test "a bad value records the flag and offending token" {
+    var d1: Diag = .{};
+    try testing.expectError(error.BadFreq, parseWithDiag(&[_][:0]const u8{ "rtl-sca", "scan", "89.9M", "--sub", "loud" }, &d1));
+    try testing.expectEqualStrings("--sub", d1.flag);
+    try testing.expectEqualStrings("loud", d1.token);
+
+    var d2: Diag = .{};
+    try testing.expectError(error.UnknownFlag, parseWithDiag(&[_][:0]const u8{ "rtl-sca", "scan", "89.9M", "--nope" }, &d2));
+    try testing.expectEqualStrings("--nope", d2.token);
 }
 
 test "error cases" {
