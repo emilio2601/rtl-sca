@@ -7,10 +7,35 @@ this document is the prose behind it.
 
 ## Commands
 
-- **`scan <input>`** — survey the FM MPX baseband and report the pilot, each
-  subcarrier slot (center, modulation, bandwidth, SNR), and a guess at its role. The
-  results table goes to **stdout**; use it to find what a station carries before
-  decoding. Reads ~4 s and exits.
+- **`scan <input>`** — survey the FM MPX baseband and print a **uniform inventory** of
+  every component as a table row (center · type · bandwidth · strength · role): the
+  0 kHz main program (L+R), the 19 kHz pilot, the 38 kHz stereo L−R, 57 kHz RDS, and
+  any 67/92 kHz audio SCAs. Use it to find what a station carries before decoding. The
+  table goes to **stdout**; reads ~4 s and exits.
+
+  Reading the table:
+  - **Strength (SNR)** is each component's level over the local noise floor — a
+    snapshot, not a fixed station property. Use it to rank targets (a 67 kHz SCA at
+    +31 dB vs +10 dB).
+  - **`0 kHz main program`** is the station-present anchor: a strong main channel with
+    *no 19 kHz pilot row* is a real **mono** station (e.g. a talk station), not a dead
+    channel. Stereo shows up as the **presence of the pilot row** — there's no separate
+    "stereo: yes/no" line.
+  - **The pilot vs the L−R.** The 19 kHz pilot is the *stable* stereo indicator (it's a
+    constant tone). The 38 kHz L−R strength is the *live stereo separation* — it's the
+    measured sideband energy, so it **drops to noise on mono program content** even
+    though the pilot stays put. A low L−R with a strong pilot means "stereo station,
+    mono content right now," not a fault.
+
+  ```
+  $ rtl-sca scan 89.9M
+  slot      mod       bw         snr     guess
+    0 kHz  -        ~15.0 kHz    16 dB  main program (L+R)
+   19 kHz  tone     ~ 0.0 kHz    30 dB  stereo pilot
+   38 kHz  am_dsb   ~30.0 kHz     8 dB  stereo subcarrier (L−R)
+   57 kHz  data     ~ 3.1 kHz    12 dB  data subcarrier (RDS)
+   67 kHz  fm       ~ 0.9 kHz    31 dB  audio SCA
+  ```
 - **`play <input> --sub HZ`** — demodulate one subcarrier and play it live out the
   default audio device. Runs until Ctrl-C.
 - **`rec <input> --sub HZ -o FILE`** — same chain, written to a 16-bit mono WAV
