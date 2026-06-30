@@ -11,7 +11,10 @@ this document is the prose behind it.
   every component as a table row (center · type · bandwidth · strength · role): the
   0 kHz main program (L+R), the 19 kHz pilot, the 38 kHz stereo L−R, 57 kHz RDS, and
   any 67/92 kHz audio SCAs. Use it to find what a station carries before decoding. The
-  table goes to **stdout**; reads ~4 s and exits.
+  table goes to **stdout**; reads ~4 s and exits. **`--scan-seconds N`** lengthens the
+  integration window — a 4 s snapshot can miss an *intermittent* or fading SCA (one
+  that comes and goes with reception), so reach for `--scan-seconds 20`+ on weak or
+  reception-limited stations where a subcarrier may be up only part of the time.
 
   Reading the table:
   - **Strength (SNR)** is each component's level over the local noise floor — a

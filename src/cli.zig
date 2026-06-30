@@ -32,6 +32,7 @@ pub const Options = struct {
     ppm: i32 = 0, // crystal correction
     out: ?[]const u8 = null,
     verbose: u8 = 0, // -v count: 0 normal, 1 per-slot classifier metrics (scan)
+    scan_seconds: u32 = 4, // `scan` integration window; longer catches intermittent/fading SCAs
 };
 
 pub const Error = error{
@@ -49,6 +50,7 @@ pub const Error = error{
     RadioFlagWithFile,
     MissingOutput,
     LowTuneFreq,
+    BadScanSeconds,
 };
 
 /// Below this, a tune frequency is almost certainly a missing suffix (`89.9` parses
@@ -107,6 +109,13 @@ pub fn parseWithDiag(args: []const [:0]const u8, diag: *Diag) Error!Options {
                 o.rate_hz = try parseFreq(try value(args, &i, inline_val, diag));
             } else if (std.mem.eql(u8, name, "--audio-rate")) {
                 o.audio_rate_hz = try parseFreq(try value(args, &i, inline_val, diag));
+            } else if (std.mem.eql(u8, name, "--scan-seconds")) {
+                const v = try value(args, &i, inline_val, diag);
+                o.scan_seconds = std.fmt.parseInt(u32, v, 10) catch return error.BadScanSeconds;
+                if (o.scan_seconds < 1 or o.scan_seconds > 300) {
+                    diag.token = v;
+                    return error.BadScanSeconds;
+                }
             } else if (std.mem.eql(u8, name, "--mod")) {
                 o.mod = parseMod(try value(args, &i, inline_val, diag)) orelse return error.BadMod;
             } else if (std.mem.eql(u8, name, "--deemph")) {
@@ -248,6 +257,7 @@ pub fn errorText(err: Error) []const u8 {
         error.RadioFlagWithFile => "radio-only flag (--gain/--ppm/--device/--remote) used with a file source",
         error.MissingOutput => "rec requires -o <file.wav>",
         error.LowTuneFreq => "tune frequency too low — frequencies are in Hz; add a k/M/G suffix (e.g. 89.9M)",
+        error.BadScanSeconds => "invalid --scan-seconds (expected an integer 1–300)",
     };
 }
 
@@ -354,6 +364,13 @@ test "gain: default is 0 dB manual, and `auto` opts into AGC" {
 
     const auto = try parse(&[_][:0]const u8{ "rtl-sca", "play", "89.9M", "--gain", "auto" });
     try testing.expectEqual(@as(?f32, null), auto.gain); // null = AGC
+}
+
+test "scan-seconds: default 4, parses, and rejects 0 / out-of-range" {
+    try testing.expectEqual(@as(u32, 4), (try parse(&[_][:0]const u8{ "rtl-sca", "scan", "99.5M" })).scan_seconds);
+    try testing.expectEqual(@as(u32, 60), (try parse(&[_][:0]const u8{ "rtl-sca", "scan", "99.5M", "--scan-seconds", "60" })).scan_seconds);
+    try testing.expectError(error.BadScanSeconds, parse(&[_][:0]const u8{ "rtl-sca", "scan", "99.5M", "--scan-seconds", "0" }));
+    try testing.expectError(error.BadScanSeconds, parse(&[_][:0]const u8{ "rtl-sca", "scan", "99.5M", "--scan-seconds", "9999" }));
 }
 
 test "radio-only flag with a file source is rejected" {

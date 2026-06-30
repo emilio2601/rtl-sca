@@ -41,6 +41,7 @@ const usage =
     \\                    (default 150us SCA; 75us US, 50us EU main channel)
     \\  --rate HZ         RTL sample rate (default 1.024M)
     \\  --audio-rate HZ   audio output rate (default 48k; e.g. 16k for small files)
+    \\  --scan-seconds N  scan integration window, seconds (default 4; longer finds fading SCAs)
     \\  --gain DB|auto    tuner gain in dB, or 'auto' for AGC (default 0)
     \\  --device N        USB dongle index (default 0)
     \\  --ppm N           crystal frequency correction, ppm (default 0)
@@ -188,7 +189,6 @@ fn driveSource(p: *pipeline.Pipeline, init: std.process.Init, w: *Io.Writer, opt
     try p.run(init.io, source, sink, running, w, dbg);
 }
 
-const scan_seconds = 4;
 const scan_read_bytes = 1 << 18;
 
 fn runScan(init: std.process.Init, w: *Io.Writer, opts: cli.Options) !void {
@@ -218,7 +218,7 @@ fn runScan(init: std.process.Init, w: *Io.Writer, opts: cli.Options) !void {
     }
     try w.flush();
 
-    const cap: usize = scan_seconds * @as(usize, @intFromFloat(fe.fs_mpx));
+    const cap: usize = opts.scan_seconds * @as(usize, @intFromFloat(fe.fs_mpx));
     const mpx = try a.alloc(f32, cap);
     const block = try a.alloc(u8, scan_read_bytes);
     const iq = try a.alloc(complex.C32, max_iq);

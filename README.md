@@ -69,6 +69,7 @@ rtl-sca play 89.9M --remote raspberrypi.local --sub 67k # drive a remote radio o
 | `--deemph TAU` | de-emphasis time constant (`150us`, `75us`, `off`, …) | `150us` |
 | `--remote H[:PORT]` | tune over an `rtl_tcp` server (IP or hostname) | — |
 | `--gain DB` \| `auto` | tuner gain in dB, or `auto` for AGC (radio only) | `0` |
+| `--scan-seconds N` | `scan` integration window (longer catches fading SCAs) | `4` |
 | `-o FILE` | output WAV path (`rec`); `-` streams to stdout | — |
 | `-v`, `-vv` | diagnostics to stderr | off |
 
