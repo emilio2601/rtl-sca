@@ -87,7 +87,9 @@ pub fn scan(base: std.mem.Allocator, mpx: []const f32, cfg: ScanConfig) !ScanRes
     // suppressed-carrier null doesn't split one slot in two); a region's centroid
     // is its center (= the suppressed carrier for DSB), its extent the bandwidth.
     const lo_bin = welch.hzBin(24_000, fs);
-    const hi_bin = welch.hzBin(@min(120_000, nyq - 4_000), fs);
+    // Cap at the MPX anti-alias cutoff (~110 kHz at fs_mpx=256k); past it is FIR
+    // rolloff noise, not signal.
+    const hi_bin = welch.hzBin(@min(110_000, nyq - 4_000), fs);
     const gfloor = percentileDb(psd_db, lo_bin, hi_bin, 0.30);
     const thr = gfloor + cfg.slot_gate_db;
     const gap_tol = welch.hzBin(1500, fs);
@@ -148,13 +150,38 @@ pub fn scan(base: std.mem.Allocator, mpx: []const f32, cfg: ScanConfig) !ScanRes
 
     var reports: [max_slots]SlotReport = undefined;
     var nrep: usize = 0;
+    // The 38 kHz stereo L−R is a suppressed-carrier null whose amplitude tracks
+    // program content, so detecting it by SNR is unreliable. It's mandatory iff the
+    // station is stereo, so infer it from the pilot (with pilot SNR as the strength
+    // proxy and the standard ±15 kHz width) rather than from a region.
+    if (stereo) {
+        reports[nrep] = .{ .center_hz = 38_000, .mod = .am_dsb, .bw_hz = 30_000, .snr_db = pilot_snr, .guess = guessFor(38_000, .am_dsb), .metrics = .{} };
+        nrep += 1;
+    }
+    var rds_snr: f64 = -1e30; // strongest hump in the 55–59 kHz RDS window
+    var rds_bw: f64 = 0;
     for (regions[0..nreg]) |r| {
+        if (near(r.center_hz, 38_000, 3000)) continue; // L−R is inferred above
         const floor = localFloorDb(psd_db, &welch, fs, r.center_hz);
         const snr = psd_db[r.peak_bin] - floor;
+        // RDS (57 kHz) is suppressed-carrier: the null at 57 kHz can split its humps
+        // into two regions (~56/58). Coalesce the whole window into one 57 kHz slot.
+        if (r.center_hz >= 55_000 and r.center_hz <= 59_000) {
+            rds_snr = @max(rds_snr, snr);
+            rds_bw = @max(rds_bw, r.bw_hz);
+            continue;
+        }
+        // On a stereo station the 23–53 kHz band is the L−R DSB; nothing else can live
+        // there, so a non-named region in it is L−R splatter, not a real subcarrier.
+        if (stereo and r.center_hz < 54_000 and !isNamedSlot(r.center_hz)) continue;
         var metrics: SlotMetrics = .{};
         const mod = stdSlotMod(r.center_hz, classify(psd, &welch, fs, r.center_hz, r.bw_hz, snr, cfg, &metrics));
         if (!keepSlot(r.center_hz, snr, r.bw_hz, mod, cfg)) continue;
         reports[nrep] = .{ .center_hz = r.center_hz, .mod = mod, .bw_hz = r.bw_hz, .snr_db = snr, .guess = guessFor(r.center_hz, mod), .metrics = metrics };
+        nrep += 1;
+    }
+    if (rds_snr >= cfg.snr_gate_db and nrep < max_slots) {
+        reports[nrep] = .{ .center_hz = 57_000, .mod = .data, .bw_hz = rds_bw, .snr_db = rds_snr, .guess = guessFor(57_000, .data), .metrics = .{} };
         nrep += 1;
     }
 
@@ -305,7 +332,7 @@ fn near(a: f64, b: f64, tol: f64) bool {
 }
 
 fn isNamedSlot(center_hz: f64) bool {
-    return near(center_hz, 38_000, 2000) or near(center_hz, 57_000, 1500) or
+    return near(center_hz, 57_000, 1500) or
         near(center_hz, 67_000, 1500) or near(center_hz, 92_000, 1500);
 }
 
@@ -324,7 +351,6 @@ fn keepSlot(center_hz: f64, snr_db: f64, bw_hz: f64, _: Modulation, cfg: ScanCon
 /// than trust the per-slot metric — a strong RDS data clock (~1.2 kHz biphase) lands in
 /// the audio band and otherwise fools the audio-likeness test into reading `fm`.
 fn stdSlotMod(center_hz: f64, classified: Modulation) Modulation {
-    if (near(center_hz, 38_000, 2000)) return .am_dsb; // stereo L−R is DSB-SC
     if (near(center_hz, 57_000, 1500)) return .data; // RDS/RBDS is digital data, not audio
     return classified;
 }
@@ -445,19 +471,19 @@ test "narrowband low-deviation FM classifies as fm (carrier present)" {
 }
 
 test "standardized slots assert their modulation regardless of the metric" {
-    // 57 kHz RDS must never read fm (a strong data clock fools the audio test); 38 kHz
-    // stereo L−R is DSB-SC; audio-band slots keep whatever classify decided.
+    // 57 kHz RDS must never read fm (a strong data clock fools the audio test);
+    // audio-band slots keep whatever classify decided. (38 kHz is no longer here —
+    // the stereo L−R is inferred from the pilot, not classified from a region.)
     try testing.expectEqual(Modulation.data, stdSlotMod(57_000, .fm));
     try testing.expectEqual(Modulation.data, stdSlotMod(57_200, .unknown));
-    try testing.expectEqual(Modulation.am_dsb, stdSlotMod(38_000, .unknown));
     try testing.expectEqual(Modulation.fm, stdSlotMod(67_000, .fm));
     try testing.expectEqual(Modulation.unknown, stdSlotMod(67_000, .unknown));
 }
 
 test "junk filter drops spurs by bandwidth, keeps real and standardized slots" {
     const cfg = ScanConfig{};
-    // standardized slots always pass — even the wide 38 kHz stereo and weak named slots
-    try testing.expect(keepSlot(38_000, 1, 30_000, .am_dsb, cfg));
+    // named slots (57/67/92) always pass — even weak ones (38 kHz isn't filtered
+    // here anymore; it's inferred from the pilot)
     try testing.expect(keepSlot(67_000, 2, 6_000, .fm, cfg));
     // noise-level non-standard region
     try testing.expect(!keepSlot(101_000, 1, 17_400, .unknown, cfg));
@@ -469,7 +495,7 @@ test "junk filter drops spurs by bandwidth, keeps real and standardized slots" {
     try testing.expect(keepSlot(80_000, 10, 6_000, .fm, cfg));
 }
 
-test "scan finds no slots in plain mono+pilot (no false positives)" {
+test "a pilot yields the inferred 38k L−R and no phantom SCAs" {
     const fs = 256_000.0;
     const N = 600_000;
     const buf = try testing.allocator.alloc(f32, N);
@@ -485,5 +511,9 @@ test "scan finds no slots in plain mono+pilot (no false positives)" {
     var res = try scan(testing.allocator, buf, .{});
     defer res.deinit();
     try testing.expect(res.stereo);
-    try testing.expectEqual(@as(usize, 0), res.slots.len);
+    // the pilot implies exactly the 38 kHz stereo L−R — and nothing else (no
+    // hallucinated SCA from the mono program audio).
+    try testing.expectEqual(@as(usize, 1), res.slots.len);
+    try testing.expect(near(res.slots[0].center_hz, 38_000, 2000));
+    try testing.expectEqual(Modulation.am_dsb, res.slots[0].mod);
 }
