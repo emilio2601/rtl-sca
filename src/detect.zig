@@ -1,7 +1,7 @@
 const std = @import("std");
 const Welch = @import("fft.zig").Welch;
 
-pub const Modulation = enum { fm, am_dsb, data, unknown };
+pub const Modulation = enum { none, tone, fm, am_dsb, data, unknown };
 
 /// The metrics behind a classification, surfaced for `scan -v`. NaN ⇒ not computed
 /// (the slot returned before classification, e.g. below the SNR gate).
@@ -20,15 +20,26 @@ pub const SlotReport = struct {
     metrics: SlotMetrics = .{},
 
     pub fn format(self: SlotReport, w: *std.Io.Writer) std.Io.Writer.Error!void {
-        try w.print("{d:>3.0} kHz  {t:<8} ~{d:>4.1} kHz  {d:>4.0} dB  {s}", .{
+        try w.print("{d:>3.0} kHz  {s:<8} ~{d:>4.1} kHz  {d:>4.0} dB  {s}", .{
             self.center_hz / 1000.0,
-            self.mod,
+            modName(self.mod),
             self.bw_hz / 1000.0,
             self.snr_db,
             self.guess,
         });
     }
 };
+
+fn modName(m: Modulation) []const u8 {
+    return switch (m) {
+        .none => "-", // baseband (main channel) — not a modulated subcarrier
+        .tone => "tone", // the 19 kHz pilot
+        .fm => "fm",
+        .am_dsb => "am_dsb",
+        .data => "data",
+        .unknown => "unknown",
+    };
+}
 
 pub const ScanResult = struct {
     stereo: bool,
@@ -148,14 +159,26 @@ pub fn scan(base: std.mem.Allocator, mpx: []const f32, cfg: ScanConfig) !ScanRes
     errdefer result.deinit();
     const ra = result.allocator();
 
-    var reports: [max_slots]SlotReport = undefined;
+    // The report table is a uniform inventory of the whole MPX, one row per
+    // component (main channel, pilot, L−R, RDS, SCAs) — each with its strength.
+    var reports: [max_slots + 8]SlotReport = undefined;
     var nrep: usize = 0;
-    // The 38 kHz stereo L−R is a suppressed-carrier null whose amplitude tracks
-    // program content, so detecting it by SNR is unreliable. It's mandatory iff the
-    // station is stereo, so infer it from the pilot (with pilot SNR as the strength
-    // proxy and the standard ±15 kHz width) rather than from a region.
+    // 0 kHz main program (L+R): broadband audio level vs the noise floor — the
+    // "station present, and how strong" anchor that contextualizes the other slots.
+    const mono_snr = bandLevelDb(psd, &welch, fs, 1_000, 15_000) - gfloor;
+    if (mono_snr >= cfg.snr_gate_db) {
+        reports[nrep] = .{ .center_hz = 0, .mod = .none, .bw_hz = 15_000, .snr_db = mono_snr, .guess = "main program (L+R)" };
+        nrep += 1;
+    }
     if (stereo) {
-        reports[nrep] = .{ .center_hz = 38_000, .mod = .am_dsb, .bw_hz = 30_000, .snr_db = pilot_snr, .guess = guessFor(38_000, .am_dsb), .metrics = .{} };
+        // 19 kHz pilot — the stable stereo indicator (a pure tone).
+        reports[nrep] = .{ .center_hz = 19_000, .mod = .tone, .bw_hz = 0, .snr_db = pilot_snr, .guess = "stereo pilot" };
+        nrep += 1;
+        // 38 kHz L−R — present iff stereo (the pilot); its strength is the *live*
+        // sideband energy (content-dependent: drops to noise on a mono program),
+        // measured over the 23–53 kHz band rather than borrowing the pilot's number.
+        const lr_snr = bandLevelDb(psd, &welch, fs, 23_000, 53_000) - gfloor;
+        reports[nrep] = .{ .center_hz = 38_000, .mod = .am_dsb, .bw_hz = 30_000, .snr_db = lr_snr, .guess = guessFor(38_000, .am_dsb) };
         nrep += 1;
     }
     var rds_snr: f64 = -1e30; // strongest hump in the 55–59 kHz RDS window
@@ -180,7 +203,7 @@ pub fn scan(base: std.mem.Allocator, mpx: []const f32, cfg: ScanConfig) !ScanRes
         reports[nrep] = .{ .center_hz = r.center_hz, .mod = mod, .bw_hz = r.bw_hz, .snr_db = snr, .guess = guessFor(r.center_hz, mod), .metrics = metrics };
         nrep += 1;
     }
-    if (rds_snr >= cfg.snr_gate_db and nrep < max_slots) {
+    if (rds_snr >= cfg.snr_gate_db and nrep < reports.len) {
         reports[nrep] = .{ .center_hz = 57_000, .mod = .data, .bw_hz = rds_bw, .snr_db = rds_snr, .guess = guessFor(57_000, .data), .metrics = .{} };
         nrep += 1;
     }
@@ -250,6 +273,21 @@ fn percentileDb(psd_db: []const f64, lo: usize, hi: usize, p: f64) f64 {
     if (n == 0) return psd_db[0];
     std.mem.sort(f64, buf[0..n], {}, std.sort.asc(f64));
     return buf[@intFromFloat(p * @as(f64, @floatFromInt(n - 1)))];
+}
+
+/// Mean power (dB) across a frequency band — for the broadband main channel and
+/// L−R energy, which (unlike a narrowband carrier) have no single peak bin.
+fn bandLevelDb(psd: []const f64, welch: *const Welch, fs: f64, lo_hz: f64, hi_hz: f64) f64 {
+    var sum: f64 = 0;
+    var n: usize = 0;
+    var i = welch.hzBin(lo_hz, fs);
+    const e = welch.hzBin(hi_hz, fs);
+    while (i <= e and i < psd.len) : (i += 1) {
+        sum += psd[i];
+        n += 1;
+    }
+    if (n == 0) return -120;
+    return 10.0 * std.math.log10(sum / @as(f64, @floatFromInt(n)) + 1e-30);
 }
 
 /// Occupied bandwidth: walk out until the PSD drops to peak−3 dB or floor+3 dB.
@@ -366,7 +404,7 @@ fn guessFor(center_hz: f64, mod: Modulation) []const u8 {
         .fm => if (sca) "audio SCA" else "FM subcarrier",
         .am_dsb => "DSB subcarrier",
         .data => "data subcarrier",
-        .unknown => "unidentified",
+        .none, .tone, .unknown => "unidentified", // none/tone are emitted with literal labels, never here
     };
 }
 
@@ -511,9 +549,18 @@ test "a pilot yields the inferred 38k L−R and no phantom SCAs" {
     var res = try scan(testing.allocator, buf, .{});
     defer res.deinit();
     try testing.expect(res.stereo);
-    // the pilot implies exactly the 38 kHz stereo L−R — and nothing else (no
-    // hallucinated SCA from the mono program audio).
-    try testing.expectEqual(@as(usize, 1), res.slots.len);
-    try testing.expect(near(res.slots[0].center_hz, 38_000, 2000));
-    try testing.expectEqual(Modulation.am_dsb, res.slots[0].mod);
+    // the inventory has the main channel, the pilot, and the L−R — and crucially no
+    // phantom SCA hallucinated from the mono program audio.
+    var has_mono = false;
+    var has_pilot = false;
+    var has_lr = false;
+    var has_sca = false;
+    for (res.slots) |s| {
+        if (near(s.center_hz, 0, 1000)) has_mono = true;
+        if (near(s.center_hz, 19_000, 1000)) has_pilot = true;
+        if (near(s.center_hz, 38_000, 2000)) has_lr = true;
+        if (near(s.center_hz, 67_000, 2000) or near(s.center_hz, 92_000, 2000)) has_sca = true;
+    }
+    try testing.expect(has_mono and has_pilot and has_lr);
+    try testing.expect(!has_sca);
 }

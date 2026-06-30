@@ -273,19 +273,17 @@ fn runScan(init: std.process.Init, w: *Io.Writer, opts: cli.Options) !void {
 }
 
 fn printScan(w: *Io.Writer, res: detect.ScanResult, verbose: u8) !void {
-    if (res.stereo) {
-        try w.print("stereo : yes (pilot +{d:.0} dB)\n", .{res.pilot_snr_db});
-    } else {
-        try w.writeAll("stereo : no\n");
-    }
     if (res.slots.len == 0) {
-        try w.writeAll("no subcarriers detected above the noise floor\n");
+        try w.writeAll("nothing detected above the noise floor\n");
         return;
     }
-    try w.writeAll("\nslot      mod       bw         snr     guess\n");
+    // The table is the complete MPX inventory; stereo is visible as the 19 kHz pilot
+    // row (no prose summary needed). Classifier metrics (-v) apply only to the
+    // measured subcarriers, not the inferred main-channel/pilot rows.
+    try w.writeAll("slot      mod       bw         snr     guess\n");
     for (res.slots) |s| {
         try w.print("{f}\n", .{s});
-        if (verbose >= 1) try printSlotMetrics(w, s.metrics);
+        if (verbose >= 1 and s.mod != .none and s.mod != .tone) try printSlotMetrics(w, s.metrics);
     }
 }
 
