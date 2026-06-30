@@ -228,6 +228,20 @@ fn runScan(init: std.process.Init, w: *Io.Writer, opts: cli.Options) !void {
     const source = openSource(io, init.gpa, opts, &running, &fsrc, &rsrc, &usrc, reader_buf) catch |err| reportRun(w, err, opts);
     defer source.close(io);
 
+    // Flush the tune-in window on a live source: the first ~1.5 s after (re)tuning
+    // is the *previous* station bleeding through the rtl_tcp buffer (it has no
+    // flush-on-retune command) plus tuner settling. Discard it so the PSD isn't
+    // contaminated — a fresh connection's buffer is well under this.
+    if (source.isLive()) {
+        const flush_bytes: usize = 2 * @as(usize, @intFromFloat(1.5 * @as(f64, @floatFromInt(opts.rate_hz))));
+        var flushed: usize = 0;
+        while (running.load(.monotonic) and flushed < flush_bytes) {
+            const nb = source.read(block) catch |err| reportRun(w, err, opts);
+            if (nb == 0) break;
+            flushed += nb;
+        }
+    }
+
     var filled: usize = 0;
     while (running.load(.monotonic) and filled < cap) {
         const nb = source.read(block) catch |err| reportRun(w, err, opts);
