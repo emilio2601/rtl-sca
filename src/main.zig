@@ -41,7 +41,7 @@ const usage =
     \\                    (default 150us SCA; 75us US, 50us EU main channel)
     \\  --rate HZ         RTL sample rate (default 1.024M)
     \\  --audio-rate HZ   audio output rate (default 48k; e.g. 16k for small files)
-    \\  --gain DB         tuner gain (default auto)
+    \\  --gain DB|auto    tuner gain in dB, or 'auto' for AGC (default 0)
     \\  --device N        USB dongle index (default 0)
     \\  --ppm N           crystal frequency correction, ppm (default 0)
     \\  -o FILE           output WAV path (rec); - streams the WAV to stdout
@@ -209,8 +209,14 @@ fn runScan(init: std.process.Init, w: *Io.Writer, opts: cli.Options) !void {
     var fe = frontend_mod.Frontend.init(a, plan, max_iq) catch |err| reportInit(w, err);
     if (opts.verbose > 0) {
         try printRatePlan(w, plan, false);
-        try w.flush();
     }
+    // The gain sets the SNR scale, so always report it for a live radio — to stderr,
+    // keeping the stdout table clean for parsing.
+    if (opts.input == .freq) {
+        if (opts.gain) |g| try w.print("rtl-sca: gain {d:.1} dB", .{g}) else try w.writeAll("rtl-sca: gain auto");
+        try w.print(" · {d:.3} Msps\n", .{@as(f64, @floatFromInt(opts.rate_hz)) / 1e6});
+    }
+    try w.flush();
 
     const cap: usize = scan_seconds * @as(usize, @intFromFloat(fe.fs_mpx));
     const mpx = try a.alloc(f32, cap);

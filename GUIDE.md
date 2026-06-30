@@ -140,11 +140,15 @@ stay cumulative.
 ## Operating notes
 
 ### Gain & overload
-Gain is manual via `--gain` (auto by default). A strong local station can overload
-the front-end badly — e.g. a station that clips **84 %** of input samples at gain 30
-can be clean at gain 7. Watch the `-v` **input clip %** and drop the gain until it's
-~0. Because the input dBFS saturates at `0.0` the moment anything rails, the clip %
-is the real overload signal.
+Gain is manual via `--gain DB`, and the default is **0 dB** — a deliberate floor.
+The RTL tuner's AGC is poor (it pumps with signal level and makes readings
+irreproducible), so it's opt-in via `--gain auto` rather than the default. At 0 dB
+only strong signals clear the noise, so **dial the gain up** for weak subcarriers
+(the gain is printed in the output). A strong local station can overload the
+front-end badly the other way — e.g. a station that clips **84 %** of input samples
+at gain 30 can be clean at gain 7. Watch the `-v` **input clip %** and drop the gain
+until it's ~0. Because the input dBFS saturates at `0.0` the moment anything rails,
+the clip % is the real overload signal.
 
 ### Output level
 Output gains are deviation-matched (main channel ≈ unity, subcarrier ≈ 0.5) so the

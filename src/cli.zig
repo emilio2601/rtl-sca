@@ -27,7 +27,7 @@ pub const Options = struct {
     /// output defaults to 48000; live playback negotiates the device's native
     /// rate. A rational resampler bridges the internal content rate to it.
     audio_rate_hz: ?u32 = null,
-    gain: ?f32 = null, // null = auto
+    gain: ?f32 = 0, // manual gain in dB; default 0 (a deliberate floor — the RTL tuner AGC is poor, so it's opt-in). null = AGC, via `--gain auto`.
     device: u32 = 0, // USB dongle index
     ppm: i32 = 0, // crystal correction
     out: ?[]const u8 = null,
@@ -112,7 +112,8 @@ pub fn parseWithDiag(args: []const [:0]const u8, diag: *Diag) Error!Options {
             } else if (std.mem.eql(u8, name, "--deemph")) {
                 o.deemph_us = parseDeemph(try value(args, &i, inline_val, diag)) catch return error.BadDeemph;
             } else if (std.mem.eql(u8, name, "--gain")) {
-                o.gain = std.fmt.parseFloat(f32, try value(args, &i, inline_val, diag)) catch return error.BadGain;
+                const v = try value(args, &i, inline_val, diag);
+                o.gain = if (std.mem.eql(u8, v, "auto")) null else std.fmt.parseFloat(f32, v) catch return error.BadGain;
                 radio_flag = name;
             } else if (std.mem.eql(u8, name, "--device")) {
                 o.device = std.fmt.parseInt(u32, try value(args, &i, inline_val, diag), 10) catch return error.BadDevice;
@@ -345,6 +346,14 @@ test "radio knobs: device, ppm, gain" {
     try testing.expectEqual(@as(u32, 2), o.device);
     try testing.expectEqual(@as(i32, -12), o.ppm);
     try testing.expectEqual(@as(f32, 28.0), o.gain.?);
+}
+
+test "gain: default is 0 dB manual, and `auto` opts into AGC" {
+    const def = try parse(&[_][:0]const u8{ "rtl-sca", "play", "89.9M" });
+    try testing.expectEqual(@as(f32, 0), def.gain.?); // 0 dB, not AGC
+
+    const auto = try parse(&[_][:0]const u8{ "rtl-sca", "play", "89.9M", "--gain", "auto" });
+    try testing.expectEqual(@as(?f32, null), auto.gain); // null = AGC
 }
 
 test "radio-only flag with a file source is rejected" {
